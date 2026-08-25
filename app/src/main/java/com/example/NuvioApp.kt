@@ -36,25 +36,44 @@ class NuvioApp : Application() {
 
     private fun precreateWebViewCacheDirs() {
         try {
-            val cacheBase = cacheDir
-            val dataBase = filesDir?.parentFile ?: return
-            val dirs = listOf(
-                java.io.File(cacheBase, "WebView/Default/HTTP Cache/Code Cache/js"),
-                java.io.File(cacheBase, "WebView/Default/HTTP Cache/Code Cache/wasm"),
-                java.io.File(cacheBase, "WebView/Default/HTTP Cache/index-dir"),
-                java.io.File(cacheBase, "WebView/Default/HTTP Cache"),
-                java.io.File(dataBase, "app_webview/Default/HTTP Cache/Code Cache/js"),
-                java.io.File(dataBase, "app_webview/Default/HTTP Cache/Code Cache/wasm"),
-                java.io.File(dataBase, "app_webview/Default/HTTP Cache/index-dir"),
-                java.io.File(dataBase, "app_webview/Default/HTTP Cache")
+            val appDataDir = applicationInfo.dataDir
+            val baseDirs = listOfNotNull(
+                cacheDir,
+                codeCacheDir,
+                filesDir,
+                if (appDataDir != null) java.io.File(appDataDir, "cache") else null,
+                if (appDataDir != null) java.io.File(appDataDir, "app_webview") else null
             )
-            for (dir in dirs) {
-                if (!dir.exists()) {
-                    dir.mkdirs()
+
+            val subPaths = listOf(
+                "WebView/Default/HTTP Cache/Code Cache/js",
+                "WebView/Default/HTTP Cache/Code Cache/wasm",
+                "WebView/Default/HTTP Cache/index-dir",
+                "WebView/Default/HTTP Cache",
+                "WebView/Default/Code Cache/js",
+                "WebView/Default/Code Cache/wasm",
+                "Default/HTTP Cache/Code Cache/js",
+                "Default/HTTP Cache/Code Cache/wasm",
+                "Default/HTTP Cache/index-dir",
+                "Default/HTTP Cache",
+                "app_webview/Default/HTTP Cache/Code Cache/js",
+                "app_webview/Default/HTTP Cache/Code Cache/wasm",
+                "app_webview/Default/HTTP Cache/index-dir",
+                "app_webview/Default/HTTP Cache",
+                "org.chromium.android_webview/Default/HTTP Cache/Code Cache/js",
+                "org.chromium.android_webview/Default/HTTP Cache/Code Cache/wasm"
+            )
+
+            for (base in baseDirs) {
+                for (sub in subPaths) {
+                    val target = java.io.File(base, sub)
+                    if (!target.exists()) {
+                        target.mkdirs()
+                    }
                 }
             }
         } catch (e: Exception) {
-            // Non-fatal directory initialization
+            // Non-fatal initialization
         }
     }
 }
