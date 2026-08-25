@@ -36,7 +36,11 @@ data class StremioStreamItem(
 data class StremioBehaviorHints(
     @Json(name = "bingeGroup") val bingeGroup: String? = null,
     @Json(name = "notWebReady") val notWebReady: Boolean? = null,
-    @Json(name = "proxyHeaders") val proxyHeaders: Map<String, Map<String, String>>? = null
+    @Json(name = "proxyHeaders") val proxyHeaders: Map<String, Map<String, String>>? = null,
+    @Json(name = "headers") val headers: Map<String, String>? = null,
+    @Json(name = "videoHash") val videoHash: String? = null,
+    @Json(name = "videoSize") val videoSize: Long? = null,
+    @Json(name = "filename") val filename: String? = null
 )
 
 /**

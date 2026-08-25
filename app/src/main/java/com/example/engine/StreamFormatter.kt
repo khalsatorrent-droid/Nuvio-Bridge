@@ -1,5 +1,6 @@
 package com.example.engine
 
+import android.net.Uri
 import com.example.data.model.RawPluginStream
 import com.example.data.model.StremioBehaviorHints
 import com.example.data.model.StremioStreamItem
@@ -7,6 +8,8 @@ import com.example.data.model.StreamQuality
 import java.util.Locale
 
 object StreamFormatter {
+
+    private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     fun formatAndSortStreams(
         rawStreams: List<RawPluginStream>,
@@ -22,18 +25,14 @@ object StreamFormatter {
             val cleanTitle = buildCleanTitle(raw, quality)
             val cleanName = buildCleanName(raw, quality)
 
-            val behaviorHints = if (!raw.headers.isNullOrEmpty()) {
-                StremioBehaviorHints(
-                    bingeGroup = "nuvio-${quality.label.lowercase().replace(" ", "-")}",
-                    notWebReady = false,
-                    proxyHeaders = mapOf("request" to raw.headers)
-                )
-            } else {
-                StremioBehaviorHints(
-                    bingeGroup = "nuvio-${quality.label.lowercase().replace(" ", "-")}",
-                    notWebReady = false
-                )
-            }
+            val compliantHeaders = buildCompliantHeaders(raw.headers, url)
+
+            val behaviorHints = StremioBehaviorHints(
+                bingeGroup = "nuvio-${quality.label.lowercase().replace(" ", "-")}",
+                notWebReady = false,
+                proxyHeaders = mapOf("request" to compliantHeaders),
+                headers = compliantHeaders
+            )
 
             ParsedStream(
                 item = StremioStreamItem(
@@ -64,6 +63,85 @@ object StreamFormatter {
         }
 
         return sorted.map { it.item }
+    }
+
+    /**
+     * Builds compliant headers as per Stremio Addon Protocol and player specifications.
+     */
+    fun buildCompliantHeaders(
+        pluginHeaders: Map<String, String>?,
+        streamUrl: String
+    ): Map<String, String> {
+        val headers = mutableMapOf<String, String>()
+
+        // 1. Copy plugin-supplied headers with case-normalization
+        if (pluginHeaders != null) {
+            for ((key, value) in pluginHeaders) {
+                if (key.isNotBlank() && value.isNotBlank()) {
+                    val normalizedKey = normalizeHeaderKey(key)
+                    headers[normalizedKey] = value
+                }
+            }
+        }
+
+        // 2. Ensure User-Agent is present
+        if (!headers.containsKey("User-Agent")) {
+            headers["User-Agent"] = DEFAULT_USER_AGENT
+        }
+
+        // 3. Ensure Referer and Origin are present if not specified
+        try {
+            val uri = Uri.parse(streamUrl)
+            val host = uri.host
+            val scheme = uri.scheme ?: "https"
+            if (!host.isNullOrBlank()) {
+                val origin = "$scheme://$host"
+                if (!headers.containsKey("Referer")) {
+                    headers["Referer"] = "$origin/"
+                }
+                if (!headers.containsKey("Origin")) {
+                    headers["Origin"] = origin
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 4. Ensure streaming optimization headers
+        if (!headers.containsKey("Accept")) {
+            headers["Accept"] = "*/*"
+        }
+        if (!headers.containsKey("Accept-Language")) {
+            headers["Accept-Language"] = "en-US,en;q=0.9"
+        }
+        if (!headers.containsKey("Sec-Fetch-Dest")) {
+            headers["Sec-Fetch-Dest"] = "video"
+        }
+        if (!headers.containsKey("Sec-Fetch-Mode")) {
+            headers["Sec-Fetch-Mode"] = "cors"
+        }
+        if (!headers.containsKey("Sec-Fetch-Site")) {
+            headers["Sec-Fetch-Site"] = "cross-site"
+        }
+
+        return headers
+    }
+
+    private fun normalizeHeaderKey(key: String): String {
+        return when (key.lowercase(Locale.ROOT)) {
+            "user-agent", "useragent" -> "User-Agent"
+            "referer", "referrer" -> "Referer"
+            "origin" -> "Origin"
+            "accept" -> "Accept"
+            "accept-language" -> "Accept-Language"
+            "accept-encoding" -> "Accept-Encoding"
+            "range" -> "Range"
+            "cookie" -> "Cookie"
+            "authorization" -> "Authorization"
+            "connection" -> "Connection"
+            "sec-fetch-dest" -> "Sec-Fetch-Dest"
+            "sec-fetch-mode" -> "Sec-Fetch-Mode"
+            "sec-fetch-site" -> "Sec-Fetch-Site"
+            else -> key
+        }
     }
 
     private data class ParsedStream(

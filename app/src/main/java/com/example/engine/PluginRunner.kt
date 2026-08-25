@@ -180,13 +180,31 @@ class PluginRunner(private val context: Context) {
                                 if (!s || typeof s !== 'object') return null;
                                 const streamUrl = s.url || s.file || s.streamUrl || s.link || s.stream || '';
                                 if (!streamUrl) return null;
+
+                                let extractedHeaders = null;
+                                if (s.headers && typeof s.headers === 'object') {
+                                    extractedHeaders = s.headers;
+                                } else if (s.header && typeof s.header === 'object') {
+                                    extractedHeaders = s.header;
+                                } else if (s.requestHeaders && typeof s.requestHeaders === 'object') {
+                                    extractedHeaders = s.requestHeaders;
+                                } else if (s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request) {
+                                    extractedHeaders = s.behaviorHints.proxyHeaders.request;
+                                } else if (s.behaviorHints && s.behaviorHints.headers) {
+                                    extractedHeaders = s.behaviorHints.headers;
+                                } else if (s.proxyHeaders && s.proxyHeaders.request) {
+                                    extractedHeaders = s.proxyHeaders.request;
+                                } else if (s.options && s.options.headers) {
+                                    extractedHeaders = s.options.headers;
+                                }
+
                                 return {
                                     name: s.name || s.label || s.server || s.provider || "[Nuvio] Source",
                                     title: s.title || s.name || s.quality || "Stream Source",
                                     url: streamUrl,
                                     quality: s.quality || (s.resolution ? s.resolution + 'p' : '1080p'),
                                     provider: s.provider || s.server || s.name || "Nuvio",
-                                    headers: s.headers || null,
+                                    headers: extractedHeaders,
                                     isDirect: s.isDirect !== undefined ? s.isDirect : true
                                 };
                             }).filter(s => s !== null);

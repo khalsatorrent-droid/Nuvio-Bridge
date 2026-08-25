@@ -23,20 +23,36 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Decode Debug Keystore
+        run: |
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore || true
+          fi
+
+      - name: Create Dummy .env if Missing
+        run: |
+          if [ ! -f ".env" ]; then
+            touch .env
+          fi
+
       - name: Grant execute permission for gradlew
-        run: chmod +x gradlew || true
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x gradlew
+          fi
 
       - name: Build Debug APK
         run: |
           if [ -f "./gradlew" ]; then
-            ./gradlew assembleDebug --stacktrace
+            ./gradlew assembleDebug --no-daemon --stacktrace
           else
-            gradle assembleDebug --stacktrace
+            gradle assembleDebug --no-daemon --stacktrace
           fi
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Nuvio-Stremio-Server-Debug-APK
+          name: Nuvio-Bridge-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
+          if-no-files-found: error
