@@ -1,0 +1,7 @@
+{
+  "name": "Nuvio Bridge",
+  "description": "Local Stremio Addon Server & Nuvio Bridge powered by Nuvio plugins with quality-based stream sorting on port 8585.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

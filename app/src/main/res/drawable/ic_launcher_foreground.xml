@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Center server stack rounded box -->
+    <path
+        android:pathData="M32,32 L76,32 A8,8 0 0,1 84,40 L84,68 A8,8 0 0,1 76,76 L32,76 A8,8 0 0,1 24,68 L24,40 A8,8 0 0,1 32,32 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="24"
+                android:startY="32"
+                android:endX="84"
+                android:endY="76"
+                android:type="linear">
+                <item android:color="#7C4DFF" android:offset="0.0" />
+                <item android:color="#536DFE" android:offset="0.5" />
+                <item android:color="#00E5FF" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Server slot lines -->
+    <path
+        android:pathData="M32,44 L76,44 M32,54 L76,54 M32,64 L76,64"
+        android:strokeWidth="2.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeAlpha="0.8"
+        android:strokeLineCap="round" />
+    <!-- Glowing play beacon / stream signal -->
+    <path
+        android:pathData="M48,46 L64,54 L48,62 Z"
+        android:fillColor="#FFFFFF" />
+    <!-- Node indicator lights -->
+    <path
+        android:pathData="M78,38 A2,2 0 1,1 77.9,38 Z"
+        android:fillColor="#00E676" />
+    <path
+        android:pathData="M78,48 A2,2 0 1,1 77.9,48 Z"
+        android:fillColor="#00E5FF" />
+</vector>
+
