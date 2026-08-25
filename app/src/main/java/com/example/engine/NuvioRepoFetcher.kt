@@ -28,7 +28,7 @@ class NuvioRepoFetcher {
         try {
             val request = Request.Builder()
                 .url(repo.url)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
                 .header("Accept", "application/json, text/plain, */*")
                 .build()
 
@@ -40,7 +40,7 @@ class NuvioRepoFetcher {
                 // Parse JSON repo (e.g., manifest.json or plugins.json)
                 result.addAll(parseJsonRepo(trimmed, repo.url))
             } else {
-                // Parse HTML index page (like nuvioplugins.com/index.html)
+                // Parse HTML index page
                 result.addAll(parseHtmlRepo(trimmed, repo.url))
             }
         } catch (e: Exception) {
@@ -106,25 +106,25 @@ class NuvioRepoFetcher {
                     jsCode = downloadJsCode(jsUrl) ?: ""
                 }
 
-                // If remote JS couldn't be fetched, generate a fallback scraper function
-                if (jsCode.isEmpty()) {
-                    jsCode = generateFallbackJs(name, id)
-                }
-
-                plugins.add(
-                    PluginEntity(
-                        id = id,
-                        name = name,
-                        description = desc,
-                        version = version,
-                        author = author,
-                        repoUrl = repoUrl,
-                        jsCode = jsCode,
-                        isEnabled = true,
-                        supportedTypes = types,
-                        orderPriority = i + 1
+                // If no real JS could be loaded, do NOT inject fake embed URLs. Only add if real code is available.
+                if (jsCode.isNotBlank()) {
+                    plugins.add(
+                        PluginEntity(
+                            id = id,
+                            name = name,
+                            description = desc,
+                            version = version,
+                            author = author,
+                            repoUrl = repoUrl,
+                            jsCode = jsCode,
+                            isEnabled = true,
+                            supportedTypes = types,
+                            orderPriority = i + 1
+                        )
                     )
-                )
+                } else {
+                    Log.w(TAG, "Skipping plugin '$name' because no JS code could be loaded from '$jsUrl'")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "JSON parsing error", e)
@@ -145,24 +145,22 @@ class NuvioRepoFetcher {
                 val fullUrl = if (link.startsWith("http")) link else resolveUrl(repoUrl, link)
                 val fileName = link.substringAfterLast("/").substringBefore(".js")
 
-                var jsCode = downloadJsCode(fullUrl)
-                if (jsCode.isNullOrEmpty()) {
-                    jsCode = generateFallbackJs(fileName, fileName.lowercase())
-                }
-
-                plugins.add(
-                    PluginEntity(
-                        id = "nuvio-${fileName.lowercase()}",
-                        name = fileName.replace("-", " ").replace("_", " ").capitalizeWords(),
-                        description = "Discovered provider plugin from $repoUrl",
-                        version = "1.0.0",
-                        author = "Nuvio Repo",
-                        repoUrl = repoUrl,
-                        jsCode = jsCode,
-                        isEnabled = true,
-                        orderPriority = count
+                val jsCode = downloadJsCode(fullUrl)
+                if (!jsCode.isNullOrBlank()) {
+                    plugins.add(
+                        PluginEntity(
+                            id = "nuvio-${fileName.lowercase()}",
+                            name = fileName.replace("-", " ").replace("_", " ").capitalizeWords(),
+                            description = "Discovered provider plugin from $repoUrl",
+                            version = "1.0.0",
+                            author = "Nuvio Repo",
+                            repoUrl = repoUrl,
+                            jsCode = jsCode,
+                            isEnabled = true,
+                            orderPriority = count
+                        )
                     )
-                )
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "HTML parsing error", e)
@@ -174,7 +172,7 @@ class NuvioRepoFetcher {
         try {
             val request = Request.Builder()
                 .url(url)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
                 .build()
             val response = client.newCall(request).execute()
             response.body?.string()
@@ -197,28 +195,6 @@ class NuvioRepoFetcher {
             }
             "$baseDir${relative.removePrefix("./")}"
         }
-    }
-
-    private fun generateFallbackJs(name: String, id: String): String {
-        return """
-            async function getStreams(params) {
-                const { type, id: mediaId, season, episode, imdbId } = params;
-                const targetId = imdbId || mediaId;
-                const s = season || 1;
-                const e = episode || 1;
-                const embedUrl = type === "movie"
-                    ? "https://vidsrc.xyz/embed/movie/" + targetId
-                    : "https://vidsrc.xyz/embed/tv/" + targetId + "/" + s + "/" + e;
-                return [{
-                    name: "[Nuvio] $name",
-                    title: "$name HD • 1080p FHD\nMulti-Audio • Fast CDN",
-                    url: embedUrl,
-                    quality: "1080p",
-                    provider: "$name",
-                    isDirect: false
-                }];
-            }
-        """.trimIndent()
     }
 
     private fun String.capitalizeWords(): String {

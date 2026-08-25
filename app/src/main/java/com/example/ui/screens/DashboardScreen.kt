@@ -776,16 +776,17 @@ fun StreamItemCard(
                     modifier = Modifier.weight(1f)
                 )
 
-                if (stream.url != null) {
+                val copyTarget = stream.url ?: stream.infoHash
+                if (copyTarget != null) {
                     IconButton(
                         onClick = {
-                            copyToClipboard(context, stream.url, "Stream URL copied!")
+                            copyToClipboard(context, copyTarget, if (stream.url != null) "Stream URL copied!" else "InfoHash copied!")
                         },
                         modifier = Modifier.size(24.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Copy Stream URL",
+                            contentDescription = "Copy Stream Identifier",
                             tint = HdTextSecondary,
                             modifier = Modifier.size(16.dp)
                         )
@@ -802,6 +803,16 @@ fun StreamItemCard(
             if (stream.url != null) {
                 Text(
                     text = stream.url,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = HdTextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    ),
+                    maxLines = 1
+                )
+            } else if (stream.infoHash != null) {
+                Text(
+                    text = "magnet:?xt=urn:btih:${stream.infoHash}",
                     style = MaterialTheme.typography.labelSmall.copy(
                         color = HdTextMuted,
                         fontFamily = FontFamily.Monospace,

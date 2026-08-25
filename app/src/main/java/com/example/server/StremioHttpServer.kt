@@ -7,6 +7,7 @@ import com.example.data.model.ServerLogEntity
 import com.example.data.model.StremioManifest
 import com.example.data.model.StremioStreamResponse
 import com.example.data.repository.PluginRepository
+import com.example.engine.IdResolver
 import com.example.engine.PluginRunner
 import com.example.engine.StreamFormatter
 import com.squareup.moshi.Moshi
@@ -160,7 +161,6 @@ class StremioHttpServer(
                 sendJsonResponse(out, 200, json)
                 statusCode = 200
             } else {
-                // Serve Web Landing / Dashboard page
                 val html = generateWebDashboardHtml(hostHeader)
                 sendHtmlResponse(out, 200, html)
                 statusCode = 200
@@ -189,8 +189,10 @@ class StremioHttpServer(
         }
     }
 
+    private val responseCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, StremioStreamResponse>>()
+    private val CACHE_TTL_MS = 30 * 60 * 1000L // 30 minutes
+
     suspend fun handleStreamRequest(path: String): StremioStreamResponse {
-        // Path format: /stream/{type}/{id}.json (e.g. /stream/movie/tt0111161.json or /stream/series/tt0903747:1:1.json)
         val clean = path.removePrefix("/stream/").removeSuffix(".json")
         val segments = clean.split("/")
         if (segments.size < 2) {
@@ -199,6 +201,14 @@ class StremioHttpServer(
 
         val type = segments[0] // movie, series, anime
         val rawId = segments[1] // tt12345 or tt12345:1:1 or kitsu:123:1 or tmdb:550
+
+        // Check response cache
+        val cacheKey = "$type:$rawId:$sortByQuality:$groupByQuality:$filterOutLowQuality"
+        val cached = responseCache[cacheKey]
+        if (cached != null && System.currentTimeMillis() - cached.first < CACHE_TTL_MS) {
+            Log.d(TAG, "Serving cached stream results for $cacheKey (${cached.second.streams.size} streams)")
+            return cached.second
+        }
 
         var mainId = rawId
         var season: Int? = null
@@ -212,6 +222,14 @@ class StremioHttpServer(
             kitsuId = parts.getOrNull(1)
             episode = parts.getOrNull(2)?.toIntOrNull()
             mainId = kitsuId ?: rawId
+
+            // Resolve kitsuId to IMDb tt-id using 3-step fallback chain
+            if (!kitsuId.isNullOrEmpty()) {
+                val resolvedFromKitsu = IdResolver.resolveKitsuId(kitsuId)
+                if (!resolvedFromKitsu.isNullOrEmpty()) {
+                    imdbId = resolvedFromKitsu
+                }
+            }
         } else if (rawId.startsWith("tmdb:")) {
             val parts = rawId.split(":")
             tmdbId = parts.getOrNull(1)
@@ -225,8 +243,21 @@ class StremioHttpServer(
             episode = parts.getOrNull(2)?.toIntOrNull()
             mainId = imdbId ?: rawId
         } else {
-            imdbId = rawId
+            imdbId = if (rawId.startsWith("tt")) rawId else null
+            tmdbId = if (!rawId.startsWith("tt") && rawId.all { it.isDigit() }) rawId else null
+            mainId = rawId
         }
+
+        // Auto resolve dual IDs so providers expecting tmdbId (Nuvio standard) or imdbId receive both
+        val resolvedIds = IdResolver.resolve(
+            rawId = mainId,
+            type = type,
+            existingImdbId = imdbId,
+            existingTmdbId = tmdbId
+        )
+
+        val finalImdbId = resolvedIds.imdbId ?: imdbId
+        val finalTmdbId = resolvedIds.tmdbId ?: tmdbId
 
         val enabledPlugins = repository.getEnabledPlugins().filter { plugin ->
             val types = plugin.supportedTypes.split(",").map { it.trim().lowercase() }
@@ -248,8 +279,8 @@ class StremioHttpServer(
                         id = mainId,
                         season = season,
                         episode = episode,
-                        tmdbId = tmdbId,
-                        imdbId = imdbId,
+                        tmdbId = finalTmdbId,
+                        imdbId = finalImdbId,
                         kitsuId = kitsuId,
                         timeoutMs = timeoutMs
                     )
@@ -268,7 +299,11 @@ class StremioHttpServer(
             filterOutLowQuality = filterOutLowQuality
         )
 
-        return StremioStreamResponse(streams = formattedStreams)
+        val response = StremioStreamResponse(streams = formattedStreams)
+        if (formattedStreams.isNotEmpty()) {
+            responseCache[cacheKey] = Pair(System.currentTimeMillis(), response)
+        }
+        return response
     }
 
     private fun sendCorsResponse(out: OutputStream) {
@@ -360,7 +395,7 @@ class StremioHttpServer(
 
                     <div class="card">
                         <h3 style="margin-bottom: 8px;">Install on Stremio</h3>
-                        <p style="color: var(--text-dim); font-size: 13px;">Add this local addon to your Stremio app to stream movies & TV shows with Nuvio scrapers.</p>
+                        <p style="color: var(--text-dim); font-size: 13px;">Add this local addon to your Stremio app to stream movies & TV shows with real Nuvio scrapers.</p>
                         <div class="url-box">$manifestUrl</div>
                         <a href="$stremioDeeplink" class="btn btn-primary">⚡ Install Directly in Stremio App</a>
                         <a href="$stremioWebUrl" target="_blank" class="btn btn-secondary">🌐 Open in Stremio Web</a>
@@ -371,8 +406,8 @@ class StremioHttpServer(
                         <ul class="features">
                             <li><span>✓</span> Port $port with zero-CORS Native Bridge</li>
                             <li><span>✓</span> Automatic 4K, 1080p, 720p Quality Detection</li>
-                            <li><span>✓</span> Multi-plugin Scraper Aggregation</li>
-                            <li><span>✓</span> Supports IMDB (tt), TMDB & Kitsu IDs</li>
+                            <li><span>✓</span> Direct Multi-Plugin Scraper Aggregation</li>
+                            <li><span>✓</span> Supports TMDB, IMDB (tt) & Kitsu IDs</li>
                         </ul>
                     </div>
                 </div>

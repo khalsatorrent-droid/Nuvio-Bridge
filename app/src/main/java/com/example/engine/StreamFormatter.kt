@@ -11,39 +11,124 @@ object StreamFormatter {
 
     private const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+    /**
+     * Known session-token query param names whose values vary per-request but identify the same stream.
+     */
+    private val SESSION_TOKEN_PARAMS = setOf(
+        "token", "key", "sig", "signature", "auth", "hash", "nonce", "session",
+        "access_token", "authtoken",
+        "t", "ts", "timestamp", "expires", "expiry", "exp", "e",
+        "hdnea", "hdntl",
+        "x-amz-security-token", "x-amz-credential", "x-amz-date",
+        "x-amz-expires", "x-amz-signature", "x-amz-signed-headers", "x-amz-algorithm",
+        "_", "ott", "wmsauthsign"
+    )
+
+    /**
+     * Computes canonical deduplication key for streams matching nuvio-bridge specification.
+     */
+    fun computeDeduplicationKey(rawUrl: String): String {
+        try {
+            val uri = Uri.parse(rawUrl)
+            val path = uri.path ?: ""
+            val isHls = path.endsWith(".m3u8", ignoreCase = true) || path.endsWith(".ts", ignoreCase = true)
+
+            val queryParamNames = uri.queryParameterNames
+            val hasSessionParam = queryParamNames.any { it.lowercase(Locale.ROOT) in SESSION_TOKEN_PARAMS }
+
+            if (isHls || hasSessionParam) {
+                val host = uri.host ?: ""
+                val cleanParams = mutableListOf<String>()
+                for (name in queryParamNames) {
+                    if (name.lowercase(Locale.ROOT) !in SESSION_TOKEN_PARAMS) {
+                        val v = uri.getQueryParameter(name)
+                        if (v != null) cleanParams.add("$name=$v") else cleanParams.add(name)
+                    }
+                }
+                val queryPart = if (cleanParams.isNotEmpty()) "?${cleanParams.joinToString("&")}" else ""
+                if (isHls) {
+                    return "https://$host$path$queryPart"
+                }
+                val scheme = uri.scheme ?: "https"
+                return "$scheme://$host$path$queryPart"
+            }
+            return rawUrl
+        } catch (_: Exception) {
+            return rawUrl
+        }
+    }
+
     fun formatAndSortStreams(
         rawStreams: List<RawPluginStream>,
         sortByQuality: Boolean = true,
         groupByQuality: Boolean = true,
         filterOutLowQuality: Boolean = false
     ): List<StremioStreamItem> {
-        val parsedList = rawStreams.mapNotNull { raw ->
-            val url = raw.url?.trim()
-            if (url.isNullOrEmpty()) return@mapNotNull null
+        val seenDedupKeys = HashSet<String>()
+        val parsedList = mutableListOf<ParsedStream>()
 
-            val quality = detectQuality(raw.quality, raw.title, raw.name, url)
+        for (raw in rawStreams) {
+            val url = raw.url?.trim()
+            val infoHash = raw.infoHash?.trim()?.lowercase(Locale.ROOT)
+            val fileIdx = raw.fileIdx
+
+            if (url.isNullOrEmpty() && infoHash.isNullOrEmpty()) continue
+
+            // Deduplicate by infoHash or canonical stream URL key
+            val dedupKey = if (!infoHash.isNullOrEmpty()) {
+                "hash:$infoHash"
+            } else if (!url.isNullOrEmpty()) {
+                "url:${computeDeduplicationKey(url)}"
+            } else continue
+
+            if (seenDedupKeys.contains(dedupKey)) continue
+            seenDedupKeys.add(dedupKey)
+
+            val quality = detectQuality(raw.quality, raw.title, raw.name, url ?: "")
             val cleanTitle = buildCleanTitle(raw, quality)
             val cleanName = buildCleanName(raw, quality)
 
-            val compliantHeaders = buildCompliantHeaders(raw.headers, url)
+            val behaviorHints = if (!url.isNullOrEmpty()) {
+                val compliantHeaders = buildCompliantHeaders(raw.headers, url)
+                StremioBehaviorHints(
+                    bingeGroup = "nuvio-${quality.label.lowercase().replace(" ", "-")}",
+                    notWebReady = false,
+                    proxyHeaders = mapOf("request" to compliantHeaders),
+                    headers = compliantHeaders
+                )
+            } else {
+                StremioBehaviorHints(
+                    bingeGroup = "nuvio-${quality.label.lowercase().replace(" ", "-")}",
+                    notWebReady = false
+                )
+            }
 
-            val behaviorHints = StremioBehaviorHints(
-                bingeGroup = "nuvio-${quality.label.lowercase().replace(" ", "-")}",
-                notWebReady = false,
-                proxyHeaders = mapOf("request" to compliantHeaders),
-                headers = compliantHeaders
-            )
+            val parsedSubtitles = raw.subtitles?.mapNotNull { sub ->
+                val subUrl = sub.url?.trim()
+                if (!subUrl.isNullOrEmpty()) {
+                    com.example.data.model.StremioSubtitle(
+                        id = sub.id ?: sub.language ?: sub.lang ?: "eng",
+                        url = subUrl,
+                        lang = sub.lang ?: sub.language ?: "eng"
+                    )
+                } else null
+            }
 
-            ParsedStream(
-                item = StremioStreamItem(
-                    name = cleanName,
-                    title = cleanTitle,
-                    url = url,
-                    behaviorHints = behaviorHints
-                ),
-                quality = quality,
-                provider = raw.provider ?: "Nuvio",
-                order = quality.rank
+            parsedList.add(
+                ParsedStream(
+                    item = StremioStreamItem(
+                        name = cleanName,
+                        title = cleanTitle,
+                        url = if (!url.isNullOrEmpty()) url else null,
+                        infoHash = if (!infoHash.isNullOrEmpty()) infoHash else null,
+                        fileIdx = fileIdx,
+                        subtitles = if (!parsedSubtitles.isNullOrEmpty()) parsedSubtitles else null,
+                        behaviorHints = behaviorHints
+                    ),
+                    quality = quality,
+                    provider = raw.provider ?: "Nuvio",
+                    order = quality.rank
+                )
             )
         }
 
@@ -165,7 +250,11 @@ object StreamFormatter {
     }
 
     private fun buildCleanName(raw: RawPluginStream, quality: StreamQuality): String {
-        val provider = raw.provider ?: raw.name?.replace("[Nuvio]", "")?.trim() ?: "Nuvio"
+        val rawName = raw.name?.trim() ?: ""
+        if (rawName.contains("|") || rawName.contains("•") || rawName.startsWith("[")) {
+            return rawName
+        }
+        val provider = raw.provider ?: rawName.ifEmpty { "Nuvio" }
         val qualityBadge = when (quality) {
             StreamQuality.UHD_4K -> "4K UHD"
             StreamQuality.FHD_1080P -> "1080p"

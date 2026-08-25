@@ -23,12 +23,20 @@ data class StremioStreamResponse(
 )
 
 @JsonClass(generateAdapter = true)
+data class StremioSubtitle(
+    @Json(name = "id") val id: String? = null,
+    @Json(name = "url") val url: String,
+    @Json(name = "lang") val lang: String? = "eng"
+)
+
+@JsonClass(generateAdapter = true)
 data class StremioStreamItem(
     @Json(name = "name") val name: String,
     @Json(name = "title") val title: String,
     @Json(name = "url") val url: String? = null,
     @Json(name = "infoHash") val infoHash: String? = null,
     @Json(name = "fileIdx") val fileIdx: Int? = null,
+    @Json(name = "subtitles") val subtitles: List<StremioSubtitle>? = null,
     @Json(name = "behaviorHints") val behaviorHints: StremioBehaviorHints? = null
 )
 
@@ -41,6 +49,14 @@ data class StremioBehaviorHints(
     @Json(name = "videoHash") val videoHash: String? = null,
     @Json(name = "videoSize") val videoSize: Long? = null,
     @Json(name = "filename") val filename: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class RawSubtitle(
+    @Json(name = "id") val id: String? = null,
+    @Json(name = "url") val url: String? = null,
+    @Json(name = "language") val language: String? = null,
+    @Json(name = "lang") val lang: String? = null
 )
 
 /**
@@ -57,6 +73,9 @@ data class RawPluginStream(
     @Json(name = "size") val size: String? = null,
     @Json(name = "format") val format: String? = null,
     @Json(name = "headers") val headers: Map<String, String>? = null,
+    @Json(name = "infoHash") val infoHash: String? = null,
+    @Json(name = "fileIdx") val fileIdx: Int? = null,
+    @Json(name = "subtitles") val subtitles: List<RawSubtitle>? = null,
     @Json(name = "isDirect") val isDirect: Boolean? = true
 )
 

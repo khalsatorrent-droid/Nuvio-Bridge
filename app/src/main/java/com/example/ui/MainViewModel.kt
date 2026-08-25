@@ -13,6 +13,7 @@ import com.example.data.model.PluginEntity
 import com.example.data.model.RepoEntity
 import com.example.data.model.ServerLogEntity
 import com.example.data.model.StremioStreamItem
+import com.example.engine.IdResolver
 import com.example.engine.StreamFormatter
 import com.example.server.ServerService
 import com.example.util.NetworkUtils
@@ -30,7 +31,7 @@ data class MainUiState(
     val serverPort: Int = 8585,
     val localIp: String = "127.0.0.1",
     val wifiConnected: Boolean = false,
-    val testQuery: String = "tt0111161", // Default: Shawshank Redemption
+    val testQuery: String = "tt0111161", // Default: Shawshank Redemption (or TMDB 278)
     val testType: String = "movie",
     val testSeason: String = "1",
     val testEpisode: String = "1",
@@ -141,7 +142,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (port in 1024..65535) {
             _uiState.value = _uiState.value.copy(serverPort = port)
             if (_uiState.value.isServerRunning) {
-                // Restart server with new port
                 toggleServer()
                 viewModelScope.launch {
                     kotlinx.coroutines.delay(500)
@@ -284,6 +284,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
+                // Resolve IDs (TMDB / IMDB)
+                val resolved = IdResolver.resolve(
+                    rawId = query,
+                    type = type,
+                    existingImdbId = if (query.startsWith("tt")) query else null,
+                    existingTmdbId = if (!query.startsWith("tt") && query.all { it.isDigit() }) query else null
+                )
+
                 val rawList = mutableListOf<com.example.data.model.RawPluginStream>()
                 for (plugin in enabledPlugins) {
                     val res = pluginRunner.runPlugin(
@@ -292,10 +300,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         id = query,
                         season = season,
                         episode = episode,
-                        imdbId = if (query.startsWith("tt")) query else null,
-                        tmdbId = if (!query.startsWith("tt") && !query.startsWith("kitsu")) query else null,
+                        tmdbId = resolved.tmdbId,
+                        imdbId = resolved.imdbId,
                         kitsuId = if (query.startsWith("kitsu")) query.removePrefix("kitsu:") else null,
-                        timeoutMs = 8000
+                        timeoutMs = 10000
                     )
                     rawList.addAll(res)
                 }
@@ -310,7 +318,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.value = _uiState.value.copy(
                     isTesting = false,
                     testStreams = formatted,
-                    testError = if (formatted.isEmpty()) "No streams returned by active plugins for '$query'" else null
+                    testError = if (formatted.isEmpty()) "No verified streams returned by active plugins for '$query'" else null
                 )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(

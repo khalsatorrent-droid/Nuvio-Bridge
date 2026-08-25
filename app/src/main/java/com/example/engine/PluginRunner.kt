@@ -2,6 +2,7 @@ package com.example.engine
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -17,12 +18,12 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.Headers.Companion.toHeaders
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -37,15 +38,94 @@ class PluginRunner(private val context: Context) {
     )
 
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
     private var webView: WebView? = null
     private val pendingRequests = ConcurrentHashMap<String, CompletableDeferred<List<RawPluginStream>>>()
-    private val pendingFetches = ConcurrentHashMap<String, (Boolean, Int, String, String) -> Unit>()
+
+    companion object {
+        const val DEFAULT_TMDB_KEY = "84698579998638b251ad02e97519ff08"
+
+        val TMDB_HOSTNAME_OVERRIDES = setOf(
+            "4khdhub", "4khdhubnew", "hdhub4u", "dahmermovies", "netmirror", "moviebox",
+            "movies4u", "uhdmovies", "moviesdrive", "moviesmod"
+        )
+
+        val IMDB_HOSTNAME_OVERRIDES = setOf(
+            "vegmovies", "vegmovies.mq", "vegmovies.dad", "vegmovies.nl", "vegmovies.ms",
+            "vegmovies.com", "vegmovies.org", "vegmovies.tv", "vegmovies.in", "vegmovies.net",
+            "vegmovies.io", "vegmovies.me", "vegamovies", "veamovies", "hindmoviez",
+            "vidsrc", "vixsrc", "vidfast", "videasy", "vidlink", "vidrock", "cineby",
+            "playimdb", "showbox", "peachify", "allmovieland", "xpass", "castle", "fibwatch",
+            "dooflix", "zinkmovies", "notorrent", "movieblast", "cinemacity", "embedsu",
+            "embed.su", "autoembed", "2embed", "multiembed", "smashystream", "smashy.stream",
+            "moviesapi", "superembed", "frembed", "shadowlandschronicles", "embedrise",
+            "flicky", "nontongo", "warezcdn", "asiacloud", "vidbinge", "vidora", "vidstream",
+            "streamtape", "dl.vidsrc", "player.smashy"
+        )
+
+        /**
+         * Scans JavaScript code for embedded 32-char TMDB hex API keys.
+         */
+        fun extractTmdbApiKey(jsCode: String): String? {
+            val pattern = Regex("[0-9a-f]{32}", RegexOption.IGNORE_CASE)
+            for (match in pattern.findAll(jsCode)) {
+                val candidate = match.value.lowercase(Locale.ROOT)
+                // Filter out non-keys (all zeros, repeating chars, all same)
+                if (candidate.toSet().size >= 8 && candidate != "00000000000000000000000000000000") {
+                    return candidate
+                }
+            }
+            return null
+        }
+
+        /**
+         * Determines whether a provider prefers 'tmdb' or 'imdb' as its primary identifier.
+         */
+        fun detectIdType(plugin: PluginEntity): String {
+            val name = plugin.name.lowercase(Locale.ROOT)
+            val id = plugin.id.lowercase(Locale.ROOT)
+            val desc = plugin.description.lowercase(Locale.ROOT)
+            val js = plugin.jsCode
+
+            // 1. Explicit ID type keywords in description or name
+            if (desc.contains("imdb only") || desc.contains("imdb id") || name.contains("imdb")) {
+                return "imdb"
+            }
+            if (desc.contains("tmdb only") || desc.contains("tmdb id") || name.contains("tmdb")) {
+                return "tmdb"
+            }
+
+            // 2. Hostname / provider name overrides
+            for (kw in TMDB_HOSTNAME_OVERRIDES) {
+                if (name.contains(kw) || id.contains(kw)) return "tmdb"
+            }
+            for (kw in IMDB_HOSTNAME_OVERRIDES) {
+                if (name.contains(kw) || id.contains(kw)) return "imdb"
+            }
+
+            // 3. JS code content scanning
+            if (js.contains("external_source=imdb_id") ||
+                js.contains("searchwpjson") ||
+                js.contains("wp-json") ||
+                js.contains("wp/v2/posts")) {
+                return "imdb"
+            }
+            if (js.contains("pengu.uk") ||
+                js.contains("cinescrape") ||
+                js.contains("/3/movie/") ||
+                js.contains("/3/tv/")) {
+                return "tmdb"
+            }
+
+            // Default standard for Nuvio ecosystem is TMDB
+            return "tmdb"
+        }
+    }
 
     init {
         mainHandler.post {
@@ -56,7 +136,6 @@ class PluginRunner(private val context: Context) {
     @SuppressLint("SetJavaScriptEnabled")
     private fun initWebView() {
         try {
-            // Ensure WebView cache code directories exist so Chromium's simple_file_enumerator doesn't report missing directory errors
             try {
                 val baseCache = context.cacheDir
                 val jsCache = java.io.File(baseCache, "WebView/Default/HTTP Cache/Code Cache/js")
@@ -68,7 +147,6 @@ class PluginRunner(private val context: Context) {
             }
 
             val wv = WebView(context.applicationContext)
-            // Use software rendering to avoid MESA GPU rendernode errors in virtualized/headless environments
             wv.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
 
             wv.settings.apply {
@@ -78,7 +156,7 @@ class PluginRunner(private val context: Context) {
                 allowFileAccess = false
                 allowContentAccess = false
                 cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
-                userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             }
 
             wv.webViewClient = object : WebViewClient() {
@@ -115,15 +193,19 @@ class PluginRunner(private val context: Context) {
                                 resolve({
                                     ok: status >= 200 && status < 300,
                                     status: status,
+                                    statusText: status === 200 ? 'OK' : 'Status ' + status,
                                     text: async () => body,
-                                    json: async () => JSON.parse(body),
+                                    json: async () => {
+                                        try { return JSON.parse(body); } catch(e) { return {}; }
+                                    },
                                     headers: {
-                                        get: (k) => headersMap[k.toLowerCase()] || null
+                                        get: (k) => headersMap[k.toLowerCase()] || null,
+                                        forEach: (cb) => { Object.keys(headersMap).forEach(k => cb(headersMap[k], k)); }
                                     }
                                 });
                             };
                             
-                            NuvioNative.nativeFetch(reqId, url, optJson);
+                            NuvioNative.nativeFetch(reqId, url.toString(), optJson);
                         });
                     };
 
@@ -138,12 +220,22 @@ class PluginRunner(private val context: Context) {
                     window.executePlugin = async function(reqId, jsCode, paramsJson) {
                         try {
                             const params = JSON.parse(paramsJson);
+                            const primaryId = params.primaryId || params.tmdbId || params.imdbId || params.id || "";
+                            const altId = params.altId || (primaryId === params.tmdbId ? params.imdbId : params.tmdbId) || "";
+                            const mediaType = params.mediaType || params.type || "movie";
+                            const season = (params.season !== undefined && params.season !== null) ? Number(params.season) : 1;
+                            const episode = (params.episode !== undefined && params.episode !== null) ? Number(params.episode) : 1;
 
-                            // Environmental shims for CommonJS and ES modules
+                            // Environmental shims for CommonJS, ES modules, and Browser Global environments
                             let module = { exports: {} };
                             let exports = module.exports;
+                            let global = window;
+                            window.module = module;
+                            window.exports = exports;
+                            window.global = window;
+                            window.SCRAPER_SETTINGS = window.SCRAPER_SETTINGS || {};
 
-                            // Clean/transform export statements if present
+                            // Clean / transform ES module exports if present
                             let cleanedCode = jsCode;
                             if (cleanedCode.includes("export default")) {
                                 cleanedCode = cleanedCode.replace(/export\s+default\s+/g, "module.exports = ");
@@ -152,25 +244,150 @@ class PluginRunner(private val context: Context) {
                                 cleanedCode = cleanedCode.replace(/export\s+(async\s+function|function|const|let|var)\s+/g, "$1 ");
                             }
 
-                            const runnerFn = new Function('module', 'exports', 'params',
+                            // Polyfill require for common modules
+                            const requireShim = function(modName) {
+                                const name = String(modName).toLowerCase();
+                                if (name === 'axios') {
+                                    const axiosFn = async (cfg) => {
+                                        const url = typeof cfg === 'string' ? cfg : cfg.url;
+                                        const method = (cfg.method || 'GET').toUpperCase();
+                                        const res = await window.fetch(url, {
+                                            method: method,
+                                            headers: cfg.headers || {},
+                                            body: cfg.data ? (typeof cfg.data === 'string' ? cfg.data : JSON.stringify(cfg.data)) : ''
+                                        });
+                                        const text = await res.text();
+                                        let data = text;
+                                        try { data = JSON.parse(text); } catch(_) {}
+                                        return { data, status: res.status, headers: {}, config: cfg };
+                                    };
+                                    axiosFn.get = (url, cfg = {}) => axiosFn({ ...cfg, url, method: 'GET' });
+                                    axiosFn.post = (url, data, cfg = {}) => axiosFn({ ...cfg, url, data, method: 'POST' });
+                                    axiosFn.put = (url, data, cfg = {}) => axiosFn({ ...cfg, url, data, method: 'PUT' });
+                                    axiosFn.delete = (url, cfg = {}) => axiosFn({ ...cfg, url, method: 'DELETE' });
+                                    axiosFn.create = () => axiosFn;
+                                    axiosFn.defaults = { headers: { common: {} } };
+                                    return axiosFn;
+                                }
+                                if (name.includes('rot13')) {
+                                    return (str) => String(str).replace(/[a-zA-Z]/g, c => {
+                                        const base = c <= 'Z' ? 65 : 97;
+                                        return String.fromCharCode(base + (c.charCodeAt(0) - base + 13) % 26);
+                                    });
+                                }
+                                if (name.includes('cheerio')) {
+                                    return {
+                                        load: (html) => {
+                                            const parser = new DOMParser();
+                                            const doc = parser.parseFromString(html, 'text/html');
+                                            const q = (sel) => {
+                                                const nodes = Array.from(doc.querySelectorAll(sel));
+                                                return {
+                                                    each: (cb) => { nodes.forEach((n, i) => cb(i, n)); },
+                                                    map: (cb) => ({ get: () => nodes.map((n, i) => cb(i, n)) }),
+                                                    attr: (a) => nodes[0] ? nodes[0].getAttribute(a) : null,
+                                                    text: () => nodes.map(n => n.textContent).join(' '),
+                                                    html: () => nodes[0] ? nodes[0].innerHTML : '',
+                                                    length: nodes.length
+                                                };
+                                            };
+                                            return q;
+                                        }
+                                    };
+                                }
+                                // Generic fallback proxy
+                                return new Proxy({}, {
+                                    get: (_, prop) => () => ({})
+                                });
+                            };
+
+                            const runnerFn = new Function('module', 'exports', 'global', 'window', 'require', 'params',
                                 cleanedCode + '\n' +
+                                'const primaryId = params.primaryId || "";\n' +
+                                'const altId = params.altId || "";\n' +
+                                'const tmdbId = params.tmdbId || "";\n' +
+                                'const imdbId = params.imdbId || "";\n' +
+                                'const mediaType = params.mediaType || params.type || "movie";\n' +
+                                'const season = (params.season !== undefined && params.season !== null) ? Number(params.season) : 1;\n' +
+                                'const episode = (params.episode !== undefined && params.episode !== null) ? Number(params.episode) : 1;\n' +
+                                '\n' +
                                 'let handler = null;\n' +
+                                '// 1. Common named exports\n' +
                                 'if (typeof getStreams === "function") handler = getStreams;\n' +
+                                'else if (module.exports && typeof module.exports.getStreams === "function") handler = module.exports.getStreams;\n' +
+                                'else if (module.exports && typeof module.exports === "function") handler = module.exports;\n' +
+                                'else if (exports && typeof exports.getStreams === "function") handler = exports.getStreams;\n' +
+                                'else if (exports && typeof exports.default === "function") handler = exports.default;\n' +
+                                'else if (typeof window.getStreams === "function") handler = window.getStreams;\n' +
+                                'else if (typeof global.getStreams === "function") handler = global.getStreams;\n' +
                                 'else if (typeof getStream === "function") handler = getStream;\n' +
-                                'else if (typeof extract === "function") handler = extract;\n' +
                                 'else if (typeof getSources === "function") handler = getSources;\n' +
+                                'else if (typeof extract === "function") handler = extract;\n' +
                                 'else if (typeof streams === "function") handler = streams;\n' +
                                 'else if (typeof stream === "function") handler = stream;\n' +
-                                'else if (typeof module.exports === "function") handler = module.exports;\n' +
-                                'else if (module.exports && typeof module.exports.getStreams === "function") handler = module.exports.getStreams;\n' +
-                                'else if (module.exports && typeof module.exports.getStream === "function") handler = module.exports.getStream;\n' +
-                                'else if (exports && typeof exports.default === "function") handler = exports.default;\n' +
-                                'else if (exports && typeof exports.getStreams === "function") handler = exports.getStreams;\n' +
-                                'if (handler) { return handler(params); }\n' +
-                                'return [];'
+                                '\n' +
+                                '// 2. Dynamic export inspection for any stream handler\n' +
+                                'if (!handler && module.exports && typeof module.exports === "object") {\n' +
+                                '    for (const k of Object.keys(module.exports)) {\n' +
+                                '        if (typeof module.exports[k] === "function" && /stream/i.test(k)) {\n' +
+                                '            handler = module.exports[k];\n' +
+                                '            break;\n' +
+                                '        }\n' +
+                                '    }\n' +
+                                '}\n' +
+                                'if (!handler && typeof exports === "object") {\n' +
+                                '    for (const k of Object.keys(exports)) {\n' +
+                                '        if (typeof exports[k] === "function" && /stream/i.test(k)) {\n' +
+                                '            handler = exports[k];\n' +
+                                '            break;\n' +
+                                '        }\n' +
+                                '    }\n' +
+                                '}\n' +
+                                '\n' +
+                                'if (!handler) { return []; }\n' +
+                                '\n' +
+                                'let result = null;\n' +
+                                '// Execution Strategy 1: Nuvio Specification with Primary ID -> handler(id, type, season, episode)\n' +
+                                'try {\n' +
+                                '    const targetId = primaryId || tmdbId || imdbId;\n' +
+                                '    result = await handler(targetId, mediaType, season, episode);\n' +
+                                '} catch (e1) {\n' +
+                                '    console.warn("Primary ID signature failed:", e1);\n' +
+                                '}\n' +
+                                '\n' +
+                                '// Execution Strategy 2: Single params Object -> handler(params)\n' +
+                                'if (!result || (Array.isArray(result) && result.length === 0)) {\n' +
+                                '    try {\n' +
+                                '        const objResult = await handler(params);\n' +
+                                '        if (objResult && (Array.isArray(objResult) ? objResult.length > 0 : true)) {\n' +
+                                '            result = objResult;\n' +
+                                '        }\n' +
+                                '    } catch (e2) {}\n' +
+                                '}\n' +
+                                '\n' +
+                                '// Execution Strategy 3: Alternate ID Fallback -> handler(altId, type, season, episode)\n' +
+                                'if ((!result || (Array.isArray(result) && result.length === 0)) && altId && altId !== primaryId) {\n' +
+                                '    try {\n' +
+                                '        const altResult = await handler(altId, mediaType, season, episode);\n' +
+                                '        if (altResult && (Array.isArray(altResult) ? altResult.length > 0 : true)) {\n' +
+                                '            result = altResult;\n' +
+                                '        }\n' +
+                                '    } catch (e3) {}\n' +
+                                '}\n' +
+                                '\n' +
+                                '// Execution Strategy 4: Legacy positional -> handler(type, id, season, episode)\n' +
+                                'if (!result || (Array.isArray(result) && result.length === 0)) {\n' +
+                                '    try {\n' +
+                                '        const legacyResult = await handler(mediaType, primaryId, season, episode);\n' +
+                                '        if (legacyResult && (Array.isArray(legacyResult) ? legacyResult.length > 0 : true)) {\n' +
+                                '            result = legacyResult;\n' +
+                                '        }\n' +
+                                '    } catch (e4) {}\n' +
+                                '}\n' +
+                                'return result || [];'
                             );
 
-                            let result = await runnerFn(module, exports, params);
+                            let result = await runnerFn(module, exports, global, window, requireShim, params);
                             if (!Array.isArray(result) && result && typeof result === 'object') {
                                 result = result.streams || result.sources || [result];
                             }
@@ -178,8 +395,22 @@ class PluginRunner(private val context: Context) {
                             const rawList = Array.isArray(result) ? result : [];
                             const finalStreams = rawList.map(s => {
                                 if (!s || typeof s !== 'object') return null;
-                                const streamUrl = s.url || s.file || s.streamUrl || s.link || s.stream || '';
-                                if (!streamUrl) return null;
+                                let streamUrl = s.url || s.file || s.streamUrl || s.link || s.stream || s.externalUrl || '';
+                                let infoHash = s.infoHash || s.infohash || s.hash || null;
+                                let fileIdx = (s.fileIdx !== undefined && s.fileIdx !== null) ? Number(s.fileIdx) : null;
+
+                                if (!streamUrl && !infoHash) return null;
+
+                                if (streamUrl && (streamUrl.includes("undefined") || streamUrl.endsWith("/null"))) {
+                                    return null;
+                                }
+
+                                if (streamUrl && streamUrl.startsWith("magnet:")) {
+                                    const match = streamUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
+                                    if (match && match[1]) {
+                                        infoHash = match[1].toLowerCase();
+                                    }
+                                }
 
                                 let extractedHeaders = null;
                                 if (s.headers && typeof s.headers === 'object') {
@@ -198,12 +429,41 @@ class PluginRunner(private val context: Context) {
                                     extractedHeaders = s.options.headers;
                                 }
 
+                                let extractedSubs = null;
+                                if (Array.isArray(s.subtitles)) {
+                                    extractedSubs = s.subtitles.map(sub => ({
+                                        id: sub.id || sub.label || sub.lang || sub.language || "eng",
+                                        url: sub.url || sub.file || "",
+                                        language: sub.language || sub.lang || "eng",
+                                        lang: sub.lang || sub.language || "eng"
+                                    })).filter(sub => !!sub.url);
+                                } else if (Array.isArray(s.subs)) {
+                                    extractedSubs = s.subs.map(sub => ({
+                                        id: sub.id || sub.label || "eng",
+                                        url: sub.url || sub.file || "",
+                                        language: sub.language || sub.lang || "eng",
+                                        lang: sub.lang || sub.language || "eng"
+                                    })).filter(sub => !!sub.url);
+                                } else if (Array.isArray(s.tracks)) {
+                                    extractedSubs = s.tracks.filter(t => t.kind === 'captions' || t.kind === 'subtitles').map(t => ({
+                                        id: t.label || t.id || "eng",
+                                        url: t.file || t.url || "",
+                                        language: t.language || t.lang || "eng",
+                                        lang: t.lang || t.language || "eng"
+                                    })).filter(sub => !!sub.url);
+                                }
+
                                 return {
                                     name: s.name || s.label || s.server || s.provider || "[Nuvio] Source",
-                                    title: s.title || s.name || s.quality || "Stream Source",
-                                    url: streamUrl,
+                                    title: s.title || s.name || s.description || s.quality || "Stream Source",
+                                    url: streamUrl || null,
+                                    infoHash: infoHash,
+                                    fileIdx: fileIdx,
                                     quality: s.quality || (s.resolution ? s.resolution + 'p' : '1080p'),
                                     provider: s.provider || s.server || s.name || "Nuvio",
+                                    size: s.size || null,
+                                    format: s.format || null,
+                                    subtitles: (extractedSubs && extractedSubs.length > 0) ? extractedSubs : null,
                                     headers: extractedHeaders,
                                     isDirect: s.isDirect !== undefined ? s.isDirect : true
                                 };
@@ -218,7 +478,7 @@ class PluginRunner(private val context: Context) {
                 </script>
                 </head>
                 <body>
-                <h1>Nuvio JS Scraper Engine</h1>
+                <h1>Nuvio Scraper JS Runtime</h1>
                 </body>
                 </html>
             """.trimIndent()
@@ -240,8 +500,22 @@ class PluginRunner(private val context: Context) {
                     val headersObj = opts.optJSONObject("headers")
                     val bodyStr = opts.optString("body", "")
 
+                    var effectiveUrl = url
+
+                    // Automatic TMDB API key parameter injection if accessing TMDB API directly
+                    if (effectiveUrl.contains("api.themoviedb.org")) {
+                        try {
+                            val uri = Uri.parse(effectiveUrl)
+                            val hasApiKey = uri.getQueryParameter("api_key") != null
+                            if (!hasApiKey) {
+                                val separator = if (effectiveUrl.contains("?")) "&" else "?"
+                                effectiveUrl = "$effectiveUrl${separator}api_key=$DEFAULT_TMDB_KEY"
+                            }
+                        } catch (_: Exception) {}
+                    }
+
                     val headersBuilder = okhttp3.Headers.Builder()
-                    headersBuilder.add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    headersBuilder.add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
                     if (headersObj != null) {
                         val keys = headersObj.keys()
                         while (keys.hasNext()) {
@@ -252,7 +526,7 @@ class PluginRunner(private val context: Context) {
                     }
 
                     val requestBuilder = Request.Builder()
-                        .url(url)
+                        .url(effectiveUrl)
                         .headers(headersBuilder.build())
 
                     if (method == "POST" || method == "PUT") {
@@ -268,7 +542,7 @@ class PluginRunner(private val context: Context) {
 
                     val resHeadersObj = JSONObject()
                     for (name in response.headers.names()) {
-                        resHeadersObj.put(name.lowercase(), response.headers[name])
+                        resHeadersObj.put(name.lowercase(Locale.ROOT), response.headers[name])
                     }
 
                     mainHandler.post {
@@ -322,15 +596,22 @@ class PluginRunner(private val context: Context) {
         tmdbId: String? = null,
         imdbId: String? = null,
         kitsuId: String? = null,
-        timeoutMs: Long = 10000L
+        timeoutMs: Long = 12000L
     ): List<RawPluginStream> {
         val requestId = "req_${UUID.randomUUID().toString().replace("-", "")}"
         val deferred = CompletableDeferred<List<RawPluginStream>>()
         pendingRequests[requestId] = deferred
 
+        val idType = detectIdType(plugin)
+        val primaryId = if (idType == "imdb") (imdbId ?: id) else (tmdbId ?: id)
+        val altId = if (idType == "imdb") (tmdbId ?: id) else (imdbId ?: id)
+
         val paramsJson = JSONObject().apply {
             put("type", type)
+            put("mediaType", if (type == "movie") "movie" else "tv")
             put("id", id)
+            put("primaryId", primaryId)
+            put("altId", altId)
             if (season != null) put("season", season)
             if (episode != null) put("episode", episode)
             if (tmdbId != null) put("tmdbId", tmdbId)
@@ -353,69 +634,6 @@ class PluginRunner(private val context: Context) {
         }
 
         pendingRequests.remove(requestId)
-
-        // If JS engine timed out or yielded empty, execute smart fallback for standard scrapers
-        return if (result.isNullOrEmpty()) {
-            executeKotlinFallback(plugin, type, id, season, episode, tmdbId, imdbId, kitsuId)
-        } else {
-            result
-        }
-    }
-
-    /**
-     * Resilient Kotlin fallback that guarantees stream resolution
-     */
-    private fun executeKotlinFallback(
-        plugin: PluginEntity,
-        type: String,
-        id: String,
-        season: Int?,
-        episode: Int?,
-        tmdbId: String?,
-        imdbId: String?,
-        kitsuId: String?
-    ): List<RawPluginStream> {
-        val targetId = imdbId ?: id
-        val s = season ?: 1
-        val e = episode ?: 1
-
-        val list = mutableListOf<RawPluginStream>()
-
-        when {
-            plugin.id.contains("vidsrc") -> {
-                val url1 = if (type == "movie") "https://vidsrc.xyz/embed/movie/$targetId" else "https://vidsrc.xyz/embed/tv/$targetId/$s/$e"
-                val url2 = if (type == "movie") "https://vidsrc.pro/embed/movie/$targetId" else "https://vidsrc.pro/embed/tv/$targetId/$s/$e"
-                list.add(RawPluginStream(name = "[Nuvio] VidSrc", title = "VidSrc Main • 1080p FHD\nMulti-Audio • Fast CDN", url = url1, quality = "1080p", provider = "VidSrc"))
-                list.add(RawPluginStream(name = "[Nuvio] VidSrc Pro", title = "VidSrc Pro • 4K UHD\nDolby Atmos • High Bitrate", url = url2, quality = "4K", provider = "VidSrc Pro"))
-            }
-            plugin.id.contains("autoembed") -> {
-                val url1 = if (type == "movie") "https://player.autoembed.cc/embed/movie/$targetId" else "https://player.autoembed.cc/embed/tv/$targetId/$s/$e"
-                val url2 = if (type == "movie") "https://multiembed.mov/?video_id=$targetId" else "https://multiembed.mov/?video_id=$targetId&s=$s&e=$e"
-                list.add(RawPluginStream(name = "[Nuvio] AutoEmbed", title = "AutoEmbed Direct • 1080p\nFast CDN • Adaptive HLS", url = url1, quality = "1080p", provider = "AutoEmbed"))
-                list.add(RawPluginStream(name = "[Nuvio] MultiEmbed", title = "MultiEmbed VIP • 4K UHD\nDolby Vision • Direct Stream", url = url2, quality = "4K", provider = "MultiEmbed"))
-            }
-            plugin.id.contains("smashy") -> {
-                val url = if (type == "movie") "https://player.smashystream.com/movie/$targetId" else "https://player.smashystream.com/tv/$targetId/$s/$e"
-                list.add(RawPluginStream(name = "[Nuvio] SmashyStream", title = "Smashy DPlayer • 1080p 60FPS\nEnglish / Multi Audio", url = url, quality = "1080p", provider = "SmashyStream"))
-            }
-            plugin.id.contains("superstream") -> {
-                val url = if (type == "movie") "https://www.2embed.cc/embed/$targetId" else "https://www.2embed.cc/embedtv/$targetId&s=$s&e=$e"
-                list.add(RawPluginStream(name = "[Nuvio] SuperStream", title = "SuperStream HD • 1080p\nMulti-Subtitles • High Speed", url = url, quality = "1080p", provider = "SuperStream"))
-            }
-            plugin.id.contains("flixer") -> {
-                val url = if (type == "movie") "https://embed.su/embed/movie/$targetId" else "https://embed.su/embed/tv/$targetId/$s/$e"
-                list.add(RawPluginStream(name = "[Nuvio] Flixer 4K", title = "Flixer VIP • 4K UHD HDR\nEnglish 5.1 • 15 Mbps", url = url, quality = "4K", provider = "Flixer"))
-            }
-            plugin.id.contains("anime") -> {
-                val animeTarget = kitsuId ?: targetId
-                val url = "https://vidsrc.me/embed/anime/$animeTarget/$e"
-                list.add(RawPluginStream(name = "[Nuvio] AnimePahe", title = "AnimePahe Sub • 1080p\nJapanese Audio • English Subs", url = url, quality = "1080p", provider = "AnimePahe"))
-            }
-            else -> {
-                val genericUrl = "https://vidsrc.xyz/embed/movie/$targetId"
-                list.add(RawPluginStream(name = "[Nuvio] ${plugin.name}", title = "${plugin.name} Stream • 1080p\nFast CDN", url = genericUrl, quality = "1080p", provider = plugin.name))
-            }
-        }
-        return list
+        return result ?: emptyList()
     }
 }
