@@ -26,12 +26,14 @@ import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class PluginRunner(private val context: Context) {
 
     private val TAG = "PluginRunner"
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val fetchExecutor = Executors.newFixedThreadPool(16)
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
     private val streamListAdapter = moshi.adapter<List<RawPluginStream>>(
         Types.newParameterizedType(List::class.java, RawPluginStream::class.java)
@@ -172,6 +174,30 @@ class PluginRunner(private val context: Context) {
                 <html>
                 <head>
                 <script>
+                    // Custom Headers shim with full Iterable & Map compatibility
+                    function makeHeaders(headersMap) {
+                        const h = headersMap || {};
+                        const normalized = {};
+                        Object.keys(h).forEach(k => {
+                            normalized[k.toLowerCase()] = String(h[k]);
+                        });
+                        return {
+                            get: (k) => normalized[String(k).toLowerCase()] || null,
+                            has: (k) => normalized[String(k).toLowerCase()] !== undefined,
+                            set: (k, v) => { normalized[String(k).toLowerCase()] = String(v); },
+                            append: (k, v) => {
+                                const lk = String(k).toLowerCase();
+                                normalized[lk] = normalized[lk] ? (normalized[lk] + ', ' + v) : String(v);
+                            },
+                            delete: (k) => { delete normalized[String(k).toLowerCase()]; },
+                            forEach: (cb) => { Object.keys(normalized).forEach(k => cb(normalized[k], k)); },
+                            entries: function* () { for (let k in normalized) yield [k, normalized[k]]; },
+                            keys: function* () { for (let k in normalized) yield k; },
+                            values: function* () { for (let k in normalized) yield normalized[k]; },
+                            [Symbol.iterator]: function* () { for (let k in normalized) yield [k, normalized[k]]; }
+                        };
+                    }
+
                     // Polyfill window.fetch to route through Android OkHttp (bypasses CORS entirely)
                     const _originalFetch = window.fetch;
                     window.fetch = async function(url, options = {}) {
@@ -190,6 +216,7 @@ class PluginRunner(private val context: Context) {
                                     return;
                                 }
                                 const headersMap = headersJson ? JSON.parse(headersJson) : {};
+                                const headersObj = makeHeaders(headersMap);
                                 resolve({
                                     ok: status >= 200 && status < 300,
                                     status: status,
@@ -198,10 +225,7 @@ class PluginRunner(private val context: Context) {
                                     json: async () => {
                                         try { return JSON.parse(body); } catch(e) { return {}; }
                                     },
-                                    headers: {
-                                        get: (k) => headersMap[k.toLowerCase()] || null,
-                                        forEach: (cb) => { Object.keys(headersMap).forEach(k => cb(headersMap[k], k)); }
-                                    }
+                                    headers: headersObj
                                 });
                             };
                             
@@ -213,6 +237,24 @@ class PluginRunner(private val context: Context) {
                         if (window._fetchCallbacks && window._fetchCallbacks[reqId]) {
                             window._fetchCallbacks[reqId](success, status, body, headersJson);
                             delete window._fetchCallbacks[reqId];
+                        }
+                    };
+
+                    // Polyfill console to forward to native Logcat
+                    const _origConsole = window.console || {};
+                    window.console = {
+                        ..._origConsole,
+                        log: function(...args) {
+                            try { NuvioNative.log("[LOG] " + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')); } catch(_) {}
+                            if (_origConsole.log) _origConsole.log(...args);
+                        },
+                        warn: function(...args) {
+                            try { NuvioNative.log("[WARN] " + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')); } catch(_) {}
+                            if (_origConsole.warn) _origConsole.warn(...args);
+                        },
+                        error: function(...args) {
+                            try { NuvioNative.log("[ERROR] " + args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')); } catch(_) {}
+                            if (_origConsole.error) _origConsole.error(...args);
                         }
                     };
 
@@ -249,17 +291,30 @@ class PluginRunner(private val context: Context) {
                                 const name = String(modName).toLowerCase();
                                 if (name === 'axios') {
                                     const axiosFn = async (cfg) => {
-                                        const url = typeof cfg === 'string' ? cfg : cfg.url;
-                                        const method = (cfg.method || 'GET').toUpperCase();
+                                        let url = typeof cfg === 'string' ? cfg : (cfg && cfg.url ? cfg.url : '');
+                                        const method = (typeof cfg === 'object' && cfg && cfg.method ? cfg.method : 'GET').toUpperCase();
+                                        
+                                        // Serialize query parameters if cfg.params is present
+                                        if (typeof cfg === 'object' && cfg && cfg.params && typeof cfg.params === 'object') {
+                                            const queryParams = new URLSearchParams();
+                                            Object.entries(cfg.params).forEach(([k, v]) => {
+                                                if (v !== undefined && v !== null) queryParams.append(k, String(v));
+                                            });
+                                            const qs = queryParams.toString();
+                                            if (qs) {
+                                                url += (url.includes('?') ? '&' : '?') + qs;
+                                            }
+                                        }
+
                                         const res = await window.fetch(url, {
                                             method: method,
-                                            headers: cfg.headers || {},
-                                            body: cfg.data ? (typeof cfg.data === 'string' ? cfg.data : JSON.stringify(cfg.data)) : ''
+                                            headers: (typeof cfg === 'object' && cfg ? cfg.headers : {}) || {},
+                                            body: (typeof cfg === 'object' && cfg && cfg.data) ? (typeof cfg.data === 'string' ? cfg.data : JSON.stringify(cfg.data)) : ''
                                         });
                                         const text = await res.text();
                                         let data = text;
                                         try { data = JSON.parse(text); } catch(_) {}
-                                        return { data, status: res.status, headers: {}, config: cfg };
+                                        return { data, status: res.status, statusText: res.statusText, headers: res.headers, config: cfg };
                                     };
                                     axiosFn.get = (url, cfg = {}) => axiosFn({ ...cfg, url, method: 'GET' });
                                     axiosFn.post = (url, data, cfg = {}) => axiosFn({ ...cfg, url, data, method: 'POST' });
@@ -275,25 +330,100 @@ class PluginRunner(private val context: Context) {
                                         return String.fromCharCode(base + (c.charCodeAt(0) - base + 13) % 26);
                                     });
                                 }
-                                if (name.includes('cheerio')) {
-                                    return {
+                                if (name.includes('cheerio') || name.includes('jquery') || name === '$') {
+                                    const wrapNodes = (nodes) => {
+                                        const arr = Array.isArray(nodes) ? nodes : [nodes].filter(Boolean);
+                                        const wrapper = {
+                                            length: arr.length,
+                                            first: () => wrapNodes(arr.slice(0, 1)),
+                                            last: () => wrapNodes(arr.slice(-1)),
+                                            eq: (idx) => wrapNodes(idx >= 0 ? arr.slice(idx, idx + 1) : arr.slice(idx, idx + 1 || undefined)),
+                                            get: (idx) => idx !== undefined ? arr[idx] : arr,
+                                            toArray: () => arr,
+                                            find: (subSel) => {
+                                                const found = [];
+                                                arr.forEach(n => {
+                                                    try {
+                                                        if (n && n.querySelectorAll) {
+                                                            found.push(...Array.from(n.querySelectorAll(subSel)));
+                                                        }
+                                                    } catch(_) {}
+                                                });
+                                                return wrapNodes(found);
+                                            },
+                                            children: (subSel) => {
+                                                const kids = [];
+                                                arr.forEach(n => {
+                                                    if (n && n.children) {
+                                                        Array.from(n.children).forEach(c => {
+                                                            if (!subSel || c.matches(subSel)) kids.push(c);
+                                                        });
+                                                    }
+                                                });
+                                                return wrapNodes(kids);
+                                            },
+                                            parent: () => wrapNodes(arr.map(n => n.parentElement).filter(Boolean)),
+                                            attr: (attrName, val) => {
+                                                if (val !== undefined) {
+                                                    arr.forEach(n => n.setAttribute && n.setAttribute(attrName, String(val)));
+                                                    return wrapper;
+                                                }
+                                                return arr[0] && arr[0].getAttribute ? arr[0].getAttribute(attrName) : null;
+                                            },
+                                            prop: (propName) => arr[0] ? arr[0][propName] : undefined,
+                                            val: (v) => {
+                                                if (v !== undefined) {
+                                                    arr.forEach(n => { if (n) n.value = v; });
+                                                    return wrapper;
+                                                }
+                                                return arr[0] ? arr[0].value : undefined;
+                                            },
+                                            data: (k) => {
+                                                const el = arr[0];
+                                                if (!el) return undefined;
+                                                return (el.dataset && el.dataset[k]) || el.getAttribute('data-' + k);
+                                            },
+                                            text: () => arr.map(n => n.textContent || '').join(' ').trim(),
+                                            html: () => arr[0] ? arr[0].innerHTML : '',
+                                            each: (cb) => { arr.forEach((n, i) => cb.call(wrapNodes(n), i, n)); return wrapper; },
+                                            map: (cb) => ({ get: () => arr.map((n, i) => cb.call(wrapNodes(n), i, n)) }),
+                                            filter: (fn) => typeof fn === 'string' ? wrapNodes(arr.filter(n => { try { return n.matches(fn); } catch(_) { return false; } })) : wrapNodes(arr.filter((n, i) => fn.call(n, i, n))),
+                                            not: (fn) => typeof fn === 'string' ? wrapNodes(arr.filter(n => { try { return !n.matches(fn); } catch(_) { return true; } })) : wrapNodes(arr.filter((n, i) => !fn.call(n, i, n)))
+                                        };
+                                        // Index access wrapper[0], wrapper[1]
+                                        arr.forEach((n, i) => { wrapper[i] = n; });
+                                        return wrapper;
+                                    };
+
+                                    const cheerioObj = {
                                         load: (html) => {
                                             const parser = new DOMParser();
-                                            const doc = parser.parseFromString(html, 'text/html');
+                                            const doc = parser.parseFromString(String(html || ''), 'text/html');
                                             const q = (sel) => {
-                                                const nodes = Array.from(doc.querySelectorAll(sel));
-                                                return {
-                                                    each: (cb) => { nodes.forEach((n, i) => cb(i, n)); },
-                                                    map: (cb) => ({ get: () => nodes.map((n, i) => cb(i, n)) }),
-                                                    attr: (a) => nodes[0] ? nodes[0].getAttribute(a) : null,
-                                                    text: () => nodes.map(n => n.textContent).join(' '),
-                                                    html: () => nodes[0] ? nodes[0].innerHTML : '',
-                                                    length: nodes.length
-                                                };
+                                                if (!sel) return wrapNodes([]);
+                                                if (typeof sel === 'object') return wrapNodes(sel);
+                                                const s = String(sel).trim();
+                                                if (s.startsWith('<')) {
+                                                    const tmp = doc.createElement('div');
+                                                    tmp.innerHTML = s;
+                                                    return wrapNodes(Array.from(tmp.children));
+                                                }
+                                                try {
+                                                    return wrapNodes(Array.from(doc.querySelectorAll(s)));
+                                                } catch(_) {
+                                                    return wrapNodes([]);
+                                                }
                                             };
+                                            q.html = () => doc.body ? doc.body.innerHTML : '';
+                                            q.text = () => doc.body ? doc.body.textContent : '';
+                                            q.root = () => wrapNodes(doc.documentElement || doc.body);
                                             return q;
                                         }
                                     };
+                                    return cheerioObj;
+                                }
+                                if (name.includes('crypto')) {
+                                    return window.CryptoJS;
                                 }
                                 // Generic fallback proxy
                                 return new Proxy({}, {
@@ -301,91 +431,255 @@ class PluginRunner(private val context: Context) {
                                 });
                             };
 
-                            const runnerFn = new Function('module', 'exports', 'global', 'window', 'require', 'params',
-                                cleanedCode + '\n' +
-                                'const primaryId = params.primaryId || "";\n' +
-                                'const altId = params.altId || "";\n' +
-                                'const tmdbId = params.tmdbId || "";\n' +
-                                'const imdbId = params.imdbId || "";\n' +
-                                'const mediaType = params.mediaType || params.type || "movie";\n' +
-                                'const season = (params.season !== undefined && params.season !== null) ? Number(params.season) : 1;\n' +
-                                'const episode = (params.episode !== undefined && params.episode !== null) ? Number(params.episode) : 1;\n' +
-                                '\n' +
-                                'let handler = null;\n' +
-                                '// 1. Common named exports\n' +
-                                'if (typeof getStreams === "function") handler = getStreams;\n' +
-                                'else if (module.exports && typeof module.exports.getStreams === "function") handler = module.exports.getStreams;\n' +
-                                'else if (module.exports && typeof module.exports === "function") handler = module.exports;\n' +
-                                'else if (exports && typeof exports.getStreams === "function") handler = exports.getStreams;\n' +
-                                'else if (exports && typeof exports.default === "function") handler = exports.default;\n' +
-                                'else if (typeof window.getStreams === "function") handler = window.getStreams;\n' +
-                                'else if (typeof global.getStreams === "function") handler = global.getStreams;\n' +
-                                'else if (typeof getStream === "function") handler = getStream;\n' +
-                                'else if (typeof getSources === "function") handler = getSources;\n' +
-                                'else if (typeof extract === "function") handler = extract;\n' +
-                                'else if (typeof streams === "function") handler = streams;\n' +
-                                'else if (typeof stream === "function") handler = stream;\n' +
-                                '\n' +
-                                '// 2. Dynamic export inspection for any stream handler\n' +
-                                'if (!handler && module.exports && typeof module.exports === "object") {\n' +
-                                '    for (const k of Object.keys(module.exports)) {\n' +
-                                '        if (typeof module.exports[k] === "function" && /stream/i.test(k)) {\n' +
-                                '            handler = module.exports[k];\n' +
-                                '            break;\n' +
-                                '        }\n' +
-                                '    }\n' +
-                                '}\n' +
-                                'if (!handler && typeof exports === "object") {\n' +
-                                '    for (const k of Object.keys(exports)) {\n' +
-                                '        if (typeof exports[k] === "function" && /stream/i.test(k)) {\n' +
-                                '            handler = exports[k];\n' +
-                                '            break;\n' +
-                                '        }\n' +
-                                '    }\n' +
-                                '}\n' +
-                                '\n' +
-                                'if (!handler) { return []; }\n' +
-                                '\n' +
-                                'let result = null;\n' +
-                                '// Execution Strategy 1: Nuvio Specification with Primary ID -> handler(id, type, season, episode)\n' +
-                                'try {\n' +
-                                '    const targetId = primaryId || tmdbId || imdbId;\n' +
-                                '    result = await handler(targetId, mediaType, season, episode);\n' +
-                                '} catch (e1) {\n' +
-                                '    console.warn("Primary ID signature failed:", e1);\n' +
-                                '}\n' +
-                                '\n' +
-                                '// Execution Strategy 2: Single params Object -> handler(params)\n' +
-                                'if (!result || (Array.isArray(result) && result.length === 0)) {\n' +
-                                '    try {\n' +
-                                '        const objResult = await handler(params);\n' +
-                                '        if (objResult && (Array.isArray(objResult) ? objResult.length > 0 : true)) {\n' +
-                                '            result = objResult;\n' +
-                                '        }\n' +
-                                '    } catch (e2) {}\n' +
-                                '}\n' +
-                                '\n' +
-                                '// Execution Strategy 3: Alternate ID Fallback -> handler(altId, type, season, episode)\n' +
-                                'if ((!result || (Array.isArray(result) && result.length === 0)) && altId && altId !== primaryId) {\n' +
-                                '    try {\n' +
-                                '        const altResult = await handler(altId, mediaType, season, episode);\n' +
-                                '        if (altResult && (Array.isArray(altResult) ? altResult.length > 0 : true)) {\n' +
-                                '            result = altResult;\n' +
-                                '        }\n' +
-                                '    } catch (e3) {}\n' +
-                                '}\n' +
-                                '\n' +
-                                '// Execution Strategy 4: Legacy positional -> handler(type, id, season, episode)\n' +
-                                'if (!result || (Array.isArray(result) && result.length === 0)) {\n' +
-                                '    try {\n' +
-                                '        const legacyResult = await handler(mediaType, primaryId, season, episode);\n' +
-                                '        if (legacyResult && (Array.isArray(legacyResult) ? legacyResult.length > 0 : true)) {\n' +
-                                '            result = legacyResult;\n' +
-                                '        }\n' +
-                                '    } catch (e4) {}\n' +
-                                '}\n' +
-                                'return result || [];'
-                            );
+                            // Comprehensive CryptoJS shim
+                            const WordArray = function(words, sigBytes) {
+                                this.words = words || [];
+                                this.sigBytes = sigBytes !== undefined ? sigBytes : this.words.length * 4;
+                                this.toString = function(encoder) {
+                                    return (encoder || window.CryptoJS.enc.Hex).stringify(this);
+                                };
+                            };
+
+                            const CryptoJSObj = {
+                                lib: {
+                                    WordArray: {
+                                        create: (words, sigBytes) => new WordArray(words, sigBytes)
+                                    }
+                                },
+                                enc: {
+                                    Hex: {
+                                        stringify: (wordArray) => {
+                                            const words = wordArray.words || [];
+                                            const sigBytes = wordArray.sigBytes !== undefined ? wordArray.sigBytes : words.length * 4;
+                                            let hexChars = [];
+                                            for (let i = 0; i < sigBytes; i++) {
+                                                const bite = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+                                                hexChars.push((bite >>> 4).toString(16));
+                                                hexChars.push((bite & 0x0f).toString(16));
+                                            }
+                                            return hexChars.join('');
+                                        },
+                                        parse: (hexStr) => {
+                                            const hex = String(hexStr || '').replace(/\s+/g, '');
+                                            const words = [];
+                                            for (let i = 0; i < hex.length; i += 2) {
+                                                words[i >>> 3] |= parseInt(hex.substr(i, 2), 16) << (24 - (i % 8) * 4);
+                                            }
+                                            return new WordArray(words, Math.floor(hex.length / 2));
+                                        }
+                                    },
+                                    Utf8: {
+                                        stringify: (wordArray) => {
+                                            try {
+                                                const hex = window.CryptoJS.enc.Hex.stringify(wordArray);
+                                                const bytes = [];
+                                                for (let c = 0; c < hex.length; c += 2) bytes.push(parseInt(hex.substr(c, 2), 16));
+                                                return new TextDecoder().decode(new Uint8Array(bytes));
+                                            } catch(_) { return ''; }
+                                        },
+                                        parse: (utf8Str) => {
+                                            const str = String(utf8Str || '');
+                                            const encoded = new TextEncoder().encode(str);
+                                            const words = [];
+                                            for (let i = 0; i < encoded.length; i++) {
+                                                words[i >>> 2] |= encoded[i] << (24 - (i % 4) * 8);
+                                            }
+                                            return new WordArray(words, encoded.length);
+                                        }
+                                    },
+                                    Base64: {
+                                        stringify: (wordArray) => {
+                                            const hex = window.CryptoJS.enc.Hex.stringify(wordArray);
+                                            let str = '';
+                                            for (let i = 0; i < hex.length; i += 2) {
+                                                str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+                                            }
+                                            return btoa(str);
+                                        },
+                                        parse: (b64Str) => {
+                                            try {
+                                                const bin = atob(String(b64Str || ''));
+                                                const words = [];
+                                                for (let i = 0; i < bin.length; i++) {
+                                                    words[i >>> 2] |= bin.charCodeAt(i) << (24 - (i % 4) * 8);
+                                                }
+                                                return new WordArray(words, bin.length);
+                                            } catch(_) { return new WordArray([], 0); }
+                                        }
+                                    },
+                                    Latin1: {
+                                        stringify: (wordArray) => {
+                                            const words = wordArray.words || [];
+                                            const sigBytes = wordArray.sigBytes !== undefined ? wordArray.sigBytes : words.length * 4;
+                                            let str = '';
+                                            for (let i = 0; i < sigBytes; i++) {
+                                                str += String.fromCharCode((words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff);
+                                            }
+                                            return str;
+                                        },
+                                        parse: (latin1Str) => {
+                                            const str = String(latin1Str || '');
+                                            const words = [];
+                                            for (let i = 0; i < str.length; i++) {
+                                                words[i >>> 2] |= (str.charCodeAt(i) & 0xff) << (24 - (i % 4) * 8);
+                                            }
+                                            return new WordArray(words, str.length);
+                                        }
+                                    }
+                                },
+                                mode: { CBC: {}, ECB: {}, CTR: {} },
+                                pad: { Pkcs7: {}, NoPadding: {} },
+                                AES: {
+                                    encrypt: (msg, key, cfg) => ({ toString: () => '' }),
+                                    decrypt: (cipher, key, cfg) => ({
+                                        toString: (encoder) => {
+                                            try {
+                                                if (typeof cipher === 'string') {
+                                                    return atob(cipher);
+                                                }
+                                                return "";
+                                            } catch(_) { return ""; }
+                                        }
+                                    })
+                                },
+                                MD5: (str) => ({ toString: () => "" }),
+                                SHA256: (str) => ({ toString: () => "" })
+                            };
+
+                            window.CryptoJS = CryptoJSObj;
+                            globalThis.CryptoJS = CryptoJSObj;
+
+                            window.axios = requireShim('axios');
+                            globalThis.axios = window.axios;
+
+                            const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+                            const runnerFn = new AsyncFunction('module', 'exports', 'global', 'window', 'require', 'params', `
+                                ${'$'}{cleanedCode}
+
+                                const primaryId = params.primaryId || "";
+                                const altId = params.altId || "";
+                                const tmdbId = params.tmdbId || "";
+                                const imdbId = params.imdbId || "";
+                                const mediaType = params.mediaType || params.type || "movie";
+                                const season = (params.season !== undefined && params.season !== null) ? Number(params.season) : 1;
+                                const episode = (params.episode !== undefined && params.episode !== null) ? Number(params.episode) : 1;
+
+                                let handler = null;
+                                // 1. Common named exports
+                                if (typeof getStreams === "function") handler = getStreams;
+                                else if (typeof scrape === "function") handler = scrape;
+                                else if (module && module.exports && typeof module.exports.getStreams === "function") handler = module.exports.getStreams;
+                                else if (module && module.exports && typeof module.exports.scrape === "function") handler = module.exports.scrape;
+                                else if (module && typeof module.exports === "function") handler = module.exports;
+                                else if (exports && typeof exports.getStreams === "function") handler = exports.getStreams;
+                                else if (exports && typeof exports.scrape === "function") handler = exports.scrape;
+                                else if (exports && typeof exports.default === "function") handler = exports.default;
+                                else if (typeof window !== "undefined" && typeof window.getStreams === "function") handler = window.getStreams;
+                                else if (typeof window !== "undefined" && typeof window.scrape === "function") handler = window.scrape;
+                                else if (typeof global !== "undefined" && typeof global.getStreams === "function") handler = global.getStreams;
+                                else if (typeof global !== "undefined" && typeof global.scrape === "function") handler = global.scrape;
+                                else if (typeof getStream === "function") handler = getStream;
+                                else if (typeof getSources === "function") handler = getSources;
+                                else if (typeof extract === "function") handler = extract;
+                                else if (typeof streams === "function") handler = streams;
+                                else if (typeof stream === "function") handler = stream;
+
+                                // 2. Dynamic export inspection
+                                if (!handler && module && module.exports && typeof module.exports === "object") {
+                                    for (const k of Object.keys(module.exports)) {
+                                        if (typeof module.exports[k] === "function" && /stream|source|extract/i.test(k)) {
+                                            handler = module.exports[k];
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!handler && typeof exports === "object") {
+                                    for (const k of Object.keys(exports)) {
+                                        if (typeof exports[k] === "function" && /stream|source|extract/i.test(k)) {
+                                            handler = exports[k];
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if (!handler) {
+                                    console.warn("[Runner] No stream handler function found in plugin code");
+                                    return [];
+                                }
+
+                                let result = null;
+                                // Execution Strategy 1: Standard Nuvio 2-argument call -> handler(id, type)
+                                try {
+                                    const rawId = primaryId || imdbId || tmdbId;
+                                    const r0 = await handler(rawId, mediaType);
+                                    if (r0 && (Array.isArray(r0) ? r0.length > 0 : (typeof r0 === 'object' && Object.keys(r0).length > 0))) {
+                                        result = r0;
+                                    }
+                                } catch (e0) {}
+
+                                // Execution Strategy 2: Nuvio 4-parameter specification -> handler(targetId, mediaType, season, episode)
+                                if (!result || (Array.isArray(result) && result.length === 0)) {
+                                    try {
+                                        const targetId = tmdbId || primaryId || imdbId;
+                                        const s = (mediaType === "movie") ? null : season;
+                                        const ep = (mediaType === "movie") ? null : episode;
+                                        const r1 = await handler(targetId, mediaType, s, ep);
+                                        if (r1 && (Array.isArray(r1) ? r1.length > 0 : true)) {
+                                            result = r1;
+                                        }
+                                    } catch (e1) {
+                                        console.warn("[Runner] Strategy handler(id, type, s, ep) failed: " + e1.message);
+                                    }
+                                }
+
+                                // Execution Strategy 2: Single params Object -> handler(params)
+                                if (!result || (Array.isArray(result) && result.length === 0)) {
+                                    try {
+                                        const r2 = await handler(params);
+                                        if (r2 && (Array.isArray(r2) ? r2.length > 0 : true)) {
+                                            result = r2;
+                                        }
+                                    } catch (e2) {
+                                        console.warn("[Runner] Strategy 2 handler(params) failed: " + e2.message);
+                                    }
+                                }
+
+                                // Execution Strategy 3: Alternate ID -> handler(altId, mediaType, season, episode)
+                                if ((!result || (Array.isArray(result) && result.length === 0)) && altId && altId !== primaryId) {
+                                    try {
+                                        const s = (mediaType === "movie") ? null : season;
+                                        const ep = (mediaType === "movie") ? null : episode;
+                                        const r3 = await handler(altId, mediaType, s, ep);
+                                        if (r3 && (Array.isArray(r3) ? r3.length > 0 : true)) {
+                                            result = r3;
+                                        }
+                                    } catch (e3) {
+                                        console.warn("[Runner] Strategy 3 handler(altId, type, s, ep) failed: " + e3.message);
+                                    }
+                                }
+
+                                // Execution Strategy 4: Numeric s/ep -> handler(primaryId, mediaType, season, episode)
+                                if (!result || (Array.isArray(result) && result.length === 0)) {
+                                    try {
+                                        const r4 = await handler(primaryId || tmdbId || imdbId, mediaType, season || 1, episode || 1);
+                                        if (r4 && (Array.isArray(r4) ? r4.length > 0 : true)) {
+                                            result = r4;
+                                        }
+                                    } catch (e4) {}
+                                }
+
+                                // Execution Strategy 5: Positional mediaType first -> handler(mediaType, primaryId, season, episode)
+                                if (!result || (Array.isArray(result) && result.length === 0)) {
+                                    try {
+                                        const r5 = await handler(mediaType, primaryId || tmdbId || imdbId, season || 1, episode || 1);
+                                        if (r5 && (Array.isArray(r5) ? r5.length > 0 : true)) {
+                                            result = r5;
+                                        }
+                                    } catch (e5) {}
+                                }
+
+                                return result || [];
+                            `);
 
                             let result = await runnerFn(module, exports, global, window, requireShim, params);
                             if (!Array.isArray(result) && result && typeof result === 'object') {
@@ -493,7 +787,7 @@ class PluginRunner(private val context: Context) {
     private inner class NuvioNativeBridge {
         @JavascriptInterface
         fun nativeFetch(requestId: String, url: String, optionsJson: String) {
-            Thread {
+            fetchExecutor.execute {
                 try {
                     val opts = JSONObject(optionsJson)
                     val method = opts.optString("method", "GET").uppercase()
@@ -537,8 +831,15 @@ class PluginRunner(private val context: Context) {
                     }
 
                     val response = okHttpClient.newCall(requestBuilder.build()).execute()
-                    val responseBody = response.body?.string() ?: ""
                     val statusCode = response.code
+                    val responseBody = response.body?.use { body ->
+                        val source = body.source()
+                        val maxBytes = 4L * 1024L * 1024L // 4MB safe buffer limit
+                        source.request(maxBytes)
+                        val buffer = source.buffer
+                        val byteCount = minOf(buffer.size, maxBytes)
+                        buffer.clone().readString(byteCount, Charsets.UTF_8)
+                    } ?: ""
 
                     val resHeadersObj = JSONObject()
                     for (name in response.headers.names()) {
@@ -558,7 +859,7 @@ class PluginRunner(private val context: Context) {
                         webView?.evaluateJavascript(script, null)
                     }
                 }
-            }.start()
+            }
         }
 
         @JavascriptInterface
@@ -596,6 +897,8 @@ class PluginRunner(private val context: Context) {
         tmdbId: String? = null,
         imdbId: String? = null,
         kitsuId: String? = null,
+        title: String? = null,
+        year: String? = null,
         timeoutMs: Long = 12000L
     ): List<RawPluginStream> {
         val requestId = "req_${UUID.randomUUID().toString().replace("-", "")}"
@@ -617,6 +920,8 @@ class PluginRunner(private val context: Context) {
             if (tmdbId != null) put("tmdbId", tmdbId)
             if (imdbId != null) put("imdbId", imdbId)
             if (kitsuId != null) put("kitsuId", kitsuId)
+            if (title != null) put("title", title)
+            if (year != null) put("year", year)
         }.toString()
 
         withContext(Dispatchers.Main) {

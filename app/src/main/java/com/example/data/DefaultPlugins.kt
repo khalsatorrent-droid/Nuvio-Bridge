@@ -28,52 +28,82 @@ object DefaultPlugins {
                 id = "nuvio-yts",
                 name = "YTS Movie Torrents (4K & 1080p)",
                 description = "High-speed multi-quality P2P torrent stream resolver for Movies with verified seed health.",
-                version = "2.2.0",
+                version = "2.3.0",
                 author = "Nuvio Core",
                 repoUrl = "https://yts.mx",
                 isEnabled = true,
                 supportedTypes = "movie",
                 orderPriority = 1,
                 jsCode = """
-                    async function getStreams(params) {
+                    async function getStreams(arg1, arg2, arg3, arg4) {
                         const streams = [];
-                        const { type, id, imdbId } = params;
-                        const targetImdb = (imdbId || id || "").trim();
-                        if (type !== "movie" || !targetImdb || !targetImdb.startsWith("tt")) {
+                        let targetImdb = "";
+                        let targetTitle = "";
+                        let mediaType = "movie";
+
+                        if (typeof arg1 === "object" && arg1 !== null) {
+                            targetImdb = (arg1.imdbId || (arg1.id && String(arg1.id).startsWith("tt") ? arg1.id : "") || arg1.primaryId || "").trim();
+                            targetTitle = (arg1.title || "").trim();
+                            mediaType = arg1.mediaType || arg1.type || "movie";
+                        } else {
+                            targetImdb = String(arg1 || "").trim();
+                            mediaType = String(arg2 || "movie");
+                        }
+
+                        if (mediaType !== "movie") {
                             return streams;
                         }
 
-                        try {
-                            const url = "https://yts.mx/api/v2/list_movies.json?query_term=" + encodeURIComponent(targetImdb);
-                            const res = await fetch(url);
-                            if (!res.ok) return streams;
-                            const data = await res.json();
+                        const queriesToTry = [];
+                        if (targetImdb && targetImdb.startsWith("tt")) {
+                            queriesToTry.push(targetImdb);
+                        }
+                        if (targetTitle) {
+                            queriesToTry.push(targetTitle);
+                        }
 
-                            if (data && data.data && data.data.movies && data.data.movies.length > 0) {
-                                const movie = data.data.movies[0];
-                                const torrents = movie.torrents || [];
+                        const mirrors = ["https://yts.mx", "https://yts.pm", "https://yts.do", "https://yts.am", "https://yts.lt"];
+                        for (const query of queriesToTry) {
+                            for (const mirror of mirrors) {
+                                try {
+                                    const url = mirror + "/api/v2/list_movies.json?query_term=" + encodeURIComponent(query);
+                                    const res = await fetch(url);
+                                    if (!res.ok) continue;
+                                    const data = await res.json();
 
-                                for (const t of torrents) {
-                                    if (!t.hash) continue;
-                                    const rawQuality = t.quality || "1080p";
-                                    const qualityLabel = rawQuality === "2160p" ? "4K" : (rawQuality === "1080p" ? "1080p" : "720p");
-                                    const typeLabel = t.type ? t.type.toUpperCase() : "WEB";
-                                    const sizeStr = t.size || "Unknown Size";
-                                    const seeds = t.seeds || 0;
+                                    if (data && data.data && data.data.movies && data.data.movies.length > 0) {
+                                        for (const movie of data.data.movies) {
+                                            // Match by IMDb if targetImdb provided
+                                            if (targetImdb && movie.imdb_code && movie.imdb_code !== targetImdb) {
+                                                continue;
+                                            }
+                                            const torrents = movie.torrents || [];
+                                            for (const t of torrents) {
+                                                if (!t.hash) continue;
+                                                const rawQuality = t.quality || "1080p";
+                                                const qualityLabel = rawQuality === "2160p" ? "4K" : (rawQuality === "1080p" ? "1080p" : "720p");
+                                                const typeLabel = t.type ? t.type.toUpperCase() : "WEB";
+                                                const sizeStr = t.size || "Unknown Size";
+                                                const seeds = t.seeds || 0;
 
-                                    streams.push({
-                                        name: "[Nuvio] YTS " + qualityLabel,
-                                        title: movie.title + " (" + movie.year + ")\n" + qualityLabel + " • " + typeLabel + " • " + sizeStr + " • 👤 " + seeds + " seeds",
-                                        infoHash: t.hash.toLowerCase(),
-                                        quality: qualityLabel,
-                                        provider: "YTS",
-                                        size: sizeStr,
-                                        format: typeLabel
-                                    });
+                                                streams.push({
+                                                    name: "[Nuvio] YTS " + qualityLabel,
+                                                    title: (movie.title || "Movie") + " (" + (movie.year || "") + ")\n" + qualityLabel + " • " + typeLabel + " • " + sizeStr + " • 👤 " + seeds + " seeds",
+                                                    infoHash: t.hash.toLowerCase(),
+                                                    quality: qualityLabel,
+                                                    provider: "YTS",
+                                                    size: sizeStr,
+                                                    format: typeLabel
+                                                });
+                                            }
+                                        }
+                                        if (streams.length > 0) break;
+                                    }
+                                } catch (e) {
+                                    console.log("YTS query error on " + mirror + ": " + e.message);
                                 }
                             }
-                        } catch (e) {
-                            console.log("YTS error: " + e.message);
+                            if (streams.length > 0) break;
                         }
 
                         return streams;

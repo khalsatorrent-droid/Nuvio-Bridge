@@ -28,6 +28,7 @@ class GreetingScreenshotTest {
             isRunning = true,
             port = 8585,
             localIp = "192.168.1.100",
+            activePluginCount = 2,
             onToggle = {},
             onRefreshNetwork = {}
         )

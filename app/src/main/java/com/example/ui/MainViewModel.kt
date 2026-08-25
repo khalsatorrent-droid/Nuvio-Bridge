@@ -303,6 +303,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         tmdbId = resolved.tmdbId,
                         imdbId = resolved.imdbId,
                         kitsuId = if (query.startsWith("kitsu")) query.removePrefix("kitsu:") else null,
+                        title = resolved.title,
+                        year = resolved.year,
                         timeoutMs = 10000
                     )
                     rawList.addAll(res)

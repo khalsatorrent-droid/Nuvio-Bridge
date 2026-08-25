@@ -200,7 +200,7 @@ class StremioHttpServer(
         }
 
         val type = segments[0] // movie, series, anime
-        val rawId = segments[1] // tt12345 or tt12345:1:1 or kitsu:123:1 or tmdb:550
+        val rawId = segments.drop(1).joinToString("/") // tt12345 or tt12345:1:1 or kitsu:123:1 or tmdb:550
 
         // Check response cache
         val cacheKey = "$type:$rawId:$sortByQuality:$groupByQuality:$filterOutLowQuality"
@@ -282,6 +282,8 @@ class StremioHttpServer(
                         tmdbId = finalTmdbId,
                         imdbId = finalImdbId,
                         kitsuId = kitsuId,
+                        title = resolvedIds.title,
+                        year = resolvedIds.year,
                         timeoutMs = timeoutMs
                     )
                 } catch (e: Exception) {
