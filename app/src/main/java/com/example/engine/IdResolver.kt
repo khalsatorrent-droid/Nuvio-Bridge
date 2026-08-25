@@ -27,9 +27,11 @@ object IdResolver {
     private const val DEFAULT_TMDB_KEY = "84698579998638b251ad02e97519ff08"
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .dns(RobustDns)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
+        .retryOnConnectionFailure(true)
         .build()
 
     private val cache = ConcurrentHashMap<String, ResolvedMediaIds>()
@@ -154,7 +156,14 @@ object IdResolver {
                 val body = resp.body?.string()
                 if (resp.isSuccessful && !body.isNullOrEmpty()) {
                     val obj = JSONObject(body)
-                    val results = if (type == "tv" || type == "series") obj.optJSONArray("tv_results") else obj.optJSONArray("movie_results")
+                    val isTvType = (type == "tv" || type == "series" || type == "anime")
+                    val tvResults = obj.optJSONArray("tv_results")
+                    val movieResults = obj.optJSONArray("movie_results")
+                    val results = if (isTvType) {
+                        if (tvResults != null && tvResults.length() > 0) tvResults else movieResults
+                    } else {
+                        if (movieResults != null && movieResults.length() > 0) movieResults else tvResults
+                    }
                     if (results != null && results.length() > 0) {
                         val first = results.getJSONObject(0)
                         tmdb = first.optString("id", "")

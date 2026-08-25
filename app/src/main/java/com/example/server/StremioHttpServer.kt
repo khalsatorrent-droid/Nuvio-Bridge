@@ -48,7 +48,7 @@ class StremioHttpServer(
     var sortByQuality: Boolean = true
     var groupByQuality: Boolean = true
     var filterOutLowQuality: Boolean = false
-    var requestTimeoutSec: Int = 12
+    var requestTimeoutSec: Int = 25
 
     fun start(onStarted: ((Boolean, String?) -> Unit)? = null) {
         if (isRunning.get()) {
@@ -194,13 +194,14 @@ class StremioHttpServer(
 
     suspend fun handleStreamRequest(path: String): StremioStreamResponse {
         val clean = path.removePrefix("/stream/").removeSuffix(".json")
-        val segments = clean.split("/")
-        if (segments.size < 2) {
+        val segments = clean.split("/").filter { it.isNotEmpty() }
+        if (segments.isEmpty()) {
             return StremioStreamResponse(emptyList())
         }
 
-        val type = segments[0] // movie, series, anime
-        val rawId = segments.drop(1).joinToString("/") // tt12345 or tt12345:1:1 or kitsu:123:1 or tmdb:550
+        val type = segments[0].lowercase() // movie, series, anime, tv
+        // Join remaining path segments with colon so both /stream/series/tt123:1:2 and /stream/series/tt123/1/2 work identically
+        val rawId = segments.drop(1).joinToString(":")
 
         // Check response cache
         val cacheKey = "$type:$rawId:$sortByQuality:$groupByQuality:$filterOutLowQuality"
@@ -217,10 +218,19 @@ class StremioHttpServer(
         var tmdbId: String? = null
         var kitsuId: String? = null
 
+        val parts = rawId.split(":").filter { it.isNotEmpty() }
+
         if (rawId.startsWith("kitsu:")) {
-            val parts = rawId.split(":")
             kitsuId = parts.getOrNull(1)
-            episode = parts.getOrNull(2)?.toIntOrNull()
+            if (parts.size >= 4) {
+                // kitsu:1234:2:5 (season 2, ep 5)
+                season = parts.getOrNull(2)?.toIntOrNull()
+                episode = parts.getOrNull(3)?.toIntOrNull()
+            } else {
+                // kitsu:1234:5 (season 1, ep 5)
+                season = 1
+                episode = parts.getOrNull(2)?.toIntOrNull()
+            }
             mainId = kitsuId ?: rawId
 
             // Resolve kitsuId to IMDb tt-id using 3-step fallback chain
@@ -231,22 +241,52 @@ class StremioHttpServer(
                 }
             }
         } else if (rawId.startsWith("tmdb:")) {
-            val parts = rawId.split(":")
             tmdbId = parts.getOrNull(1)
-            season = parts.getOrNull(2)?.toIntOrNull()
-            episode = parts.getOrNull(3)?.toIntOrNull()
+            if (parts.size >= 4) {
+                season = parts.getOrNull(2)?.toIntOrNull()
+                episode = parts.getOrNull(3)?.toIntOrNull()
+            } else if (parts.size == 3) {
+                season = 1
+                episode = parts.getOrNull(2)?.toIntOrNull()
+            }
             mainId = tmdbId ?: rawId
-        } else if (rawId.contains(":")) {
-            val parts = rawId.split(":")
-            imdbId = parts.getOrNull(0)
-            season = parts.getOrNull(1)?.toIntOrNull()
-            episode = parts.getOrNull(2)?.toIntOrNull()
-            mainId = imdbId ?: rawId
+        } else if (parts.size >= 3) {
+            // e.g. tt0903747:2:5
+            val first = parts[0]
+            if (first.startsWith("tt")) {
+                imdbId = first
+            } else if (first.all { it.isDigit() }) {
+                tmdbId = first
+            }
+            season = parts[1].toIntOrNull()
+            episode = parts[2].toIntOrNull()
+            mainId = first
+        } else if (parts.size == 2) {
+            // e.g. tt0903747:5 or 12345:5
+            val first = parts[0]
+            val second = parts[1]
+            if (first.startsWith("tt")) imdbId = first
+            else if (first.all { it.isDigit() }) tmdbId = first
+            mainId = first
+            season = 1
+            episode = second.toIntOrNull()
         } else {
             imdbId = if (rawId.startsWith("tt")) rawId else null
             tmdbId = if (!rawId.startsWith("tt") && rawId.all { it.isDigit() }) rawId else null
             mainId = rawId
         }
+
+        // For non-movies (series, anime, tv), ensure season and episode are never omitted
+        if (type != "movie") {
+            if (season == null && episode != null) season = 1
+            if (episode == null && season != null) episode = 1
+            if (season == null && episode == null) {
+                season = 1
+                episode = 1
+            }
+        }
+
+        Log.i(TAG, "Stream request parsed: type=$type id=$mainId season=$season episode=$episode imdbId=$imdbId tmdbId=$tmdbId kitsuId=$kitsuId")
 
         // Auto resolve dual IDs so providers expecting tmdbId (Nuvio standard) or imdbId receive both
         val resolvedIds = IdResolver.resolve(

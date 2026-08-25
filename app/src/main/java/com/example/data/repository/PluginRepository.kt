@@ -27,7 +27,7 @@ class PluginRepository(private val db: AppDatabase) {
 
     suspend fun initializeDefaultsIfNeeded() {
         val existing = pluginDao.getAllPlugins()
-        if (existing.isEmpty() || existing.any { it.version.startsWith("1.") }) {
+        if (existing.isEmpty() || existing.any { it.version < "2.3.0" }) {
             pluginDao.insertPlugins(DefaultPlugins.getDefaultPlugins())
         }
         for (repo in DefaultPlugins.DEFAULT_REPOS) {

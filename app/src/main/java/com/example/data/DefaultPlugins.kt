@@ -114,24 +114,37 @@ object DefaultPlugins {
                 id = "nuvio-eztv",
                 name = "EZTV Series Torrents",
                 description = "Automated TV show and episode torrent stream resolver with live seed health tracking.",
-                version = "2.2.0",
+                version = "2.3.0",
                 author = "Nuvio Core",
                 repoUrl = "https://eztv.re",
                 isEnabled = true,
                 supportedTypes = "series",
                 orderPriority = 2,
                 jsCode = """
-                    async function getStreams(params) {
+                    async function getStreams(arg1, arg2, arg3, arg4) {
                         const streams = [];
-                        const { type, id, season, episode, imdbId } = params;
-                        const targetImdb = (imdbId || id || "").trim();
-                        if (type !== "series" || !targetImdb) {
+                        let targetImdb = "";
+                        let mediaType = "series";
+                        let targetSeason = 1;
+                        let targetEpisode = 1;
+
+                        if (typeof arg1 === "object" && arg1 !== null) {
+                            targetImdb = (arg1.imdbId || (arg1.id && String(arg1.id).startsWith("tt") ? arg1.id : "") || arg1.primaryId || "").trim();
+                            mediaType = arg1.mediaType || arg1.type || "series";
+                            targetSeason = Number(arg1.season || arg1.s || 1);
+                            targetEpisode = Number(arg1.episode || arg1.ep || 1);
+                        } else {
+                            targetImdb = String(arg1 || "").trim();
+                            mediaType = String(arg2 || "series");
+                            targetSeason = Number(arg3 || 1);
+                            targetEpisode = Number(arg4 || 1);
+                        }
+
+                        if (mediaType === "movie" || !targetImdb) {
                             return streams;
                         }
 
                         const cleanImdb = targetImdb.replace(/^tt/, '');
-                        const targetSeason = season || 1;
-                        const targetEpisode = episode || 1;
 
                         try {
                             const url = "https://eztv.re/api/get-torrents?imdb_id=" + encodeURIComponent(cleanImdb) + "&limit=100";
@@ -156,7 +169,7 @@ object DefaultPlugins {
 
                                         streams.push({
                                             name: "[Nuvio] EZTV " + q,
-                                            title: (t.title || "Episode") + "\n" + q + " • " + sizeBytes + " • 👤 " + seeds + " seeds",
+                                            title: (t.title || ("S" + targetSeason + "E" + targetEpisode)) + "\n" + q + " • " + sizeBytes + " • 👤 " + seeds + " seeds",
                                             infoHash: t.hash.toLowerCase(),
                                             quality: q,
                                             provider: "EZTV",
@@ -177,27 +190,40 @@ object DefaultPlugins {
                 id = "nuvio-gogoanime",
                 name = "GogoAnime HLS Stream Resolver",
                 description = "Resolves direct multi-quality HLS .m3u8 streams for Anime episodes (Sub & Dub).",
-                version = "2.2.0",
+                version = "2.3.0",
                 author = "Anime Core",
                 repoUrl = "https://gogoanime.cl",
                 isEnabled = true,
                 supportedTypes = "anime,series,movie",
                 orderPriority = 3,
                 jsCode = """
-                    async function getStreams(params) {
+                    async function getStreams(arg1, arg2, arg3, arg4) {
                         const streams = [];
-                        const { type, id, season, episode, kitsuId, imdbId } = params;
-                        const targetId = kitsuId || imdbId || id || "";
-                        const epNum = episode || 1;
+                        let targetId = "";
+                        let kitsuId = "";
+                        let imdbId = "";
+                        let epNum = 1;
+                        let title = "";
+
+                        if (typeof arg1 === "object" && arg1 !== null) {
+                            targetId = arg1.kitsuId || arg1.imdbId || arg1.id || arg1.primaryId || "";
+                            kitsuId = arg1.kitsuId || "";
+                            imdbId = arg1.imdbId || "";
+                            epNum = Number(arg1.episode || arg1.ep || 1);
+                            title = arg1.title || "";
+                        } else {
+                            targetId = String(arg1 || "");
+                            epNum = Number(arg4 || arg3 || 1);
+                        }
 
                         try {
-                            let searchTitle = targetId;
-                            if (kitsuId || targetId.startsWith("kitsu")) {
-                                const kId = targetId.replace('kitsu:', '').split(':')[0];
+                            let searchTitle = title || targetId;
+                            if ((!title || title === targetId) && (kitsuId || targetId.startsWith("kitsu"))) {
+                                const kId = (kitsuId || targetId).replace('kitsu:', '').split(':')[0];
                                 const kRes = await fetch("https://kitsu.io/api/edge/anime/" + kId);
                                 if (kRes.ok) {
                                     const kData = await kRes.json();
-                                    searchTitle = kData?.data?.attributes?.canonicalTitle || kData?.data?.attributes?.titles?.en || targetId;
+                                    searchTitle = kData?.data?.attributes?.canonicalTitle || kData?.data?.attributes?.titles?.en || searchTitle;
                                 }
                             }
 
