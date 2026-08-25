@@ -21,33 +21,37 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle
 
-      - name: Decode Debug Keystore
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          mkdir -p "$ANDROID_HOME/licenses" || true
+          echo -e "\n24333f8a63b1d7943e0e0d9a4f0cc52c2a0f60dd\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b1d7943e0e0d9a4f0cc52c2a0f60dd" > "$ANDROID_HOME/licenses/android-sdk-license" || true
+          echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license" || true
+
+      - name: Prepare Debug Keystore
         run: |
           if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore || true
           fi
-
-      - name: Create Dummy .env if Missing
-        run: |
-          if [ ! -f ".env" ]; then
-            touch .env
+          if [ ! -f "debug.keystore" ]; then
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Grant execute permission for gradlew
+      - name: Prepare Environment Files
         run: |
-          if [ -f "./gradlew" ]; then
-            chmod +x gradlew
+          touch .env
+          if [ -f ".env.example" ]; then
+            cp .env.example .env
           fi
 
       - name: Build Debug APK
         run: |
-          if [ -f "./gradlew" ]; then
-            ./gradlew assembleDebug --no-daemon --stacktrace
-          else
-            gradle assembleDebug --no-daemon --stacktrace
-          fi
+          gradle assembleDebug -x test -x verifyRoborazziDebug --no-daemon --stacktrace -Dorg.gradle.jvmargs="-Xmx4g -XX:+UseG1GC"
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
