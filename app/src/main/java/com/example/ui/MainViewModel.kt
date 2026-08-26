@@ -102,7 +102,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         initialValue = 0
     )
 
-    val executionLogs: StateFlow<List<com.example.engine.ExecutionStepLog>> = com.example.engine.AppLogger.logsFlow
+    val executionLogs: StateFlow<List<com.example.engine.LogEntry>> = com.example.engine.AppLogger.logsFlow
+
+    fun getAllLogsText(): String = com.example.engine.AppLogger.getAllText()
 
     init {
         viewModelScope.launch {

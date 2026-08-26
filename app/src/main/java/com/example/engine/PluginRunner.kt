@@ -197,7 +197,8 @@ class PluginRunner(private val context: Context) {
             wv.webChromeClient = object : WebChromeClient() {
                 override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                     consoleMessage?.let {
-                        val msg = it.message()
+                        val rawMsg = it.message() ?: ""
+                        val msg = if (rawMsg.length > 200) rawMsg.take(200) + "..." else rawMsg
                         val level = it.messageLevel()
                         if (level == ConsoleMessage.MessageLevel.ERROR) {
                             AppLogger.error("JS-Console", "Runtime Error", msg, "Line ${it.lineNumber()}")
