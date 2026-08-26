@@ -48,7 +48,7 @@ class StremioHttpServer(
     var sortByQuality: Boolean = true
     var groupByQuality: Boolean = true
     var filterOutLowQuality: Boolean = false
-    var requestTimeoutSec: Int = 25
+    var requestTimeoutSec: Int = 0 // 0 = Unlimited (Runs until JS provider code completes)
 
     fun start(onStarted: ((Boolean, String?) -> Unit)? = null) {
         if (isRunning.get()) {
@@ -110,7 +110,7 @@ class StremioHttpServer(
         val clientIp = socket.inetAddress?.hostAddress ?: "127.0.0.1"
 
         try {
-            socket.soTimeout = 20000
+            socket.soTimeout = if (requestTimeoutSec <= 0) 300_000 else ((requestTimeoutSec + 30) * 1000).coerceAtLeast(60_000)
             val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
             val out = socket.getOutputStream()
 
@@ -327,8 +327,8 @@ class StremioHttpServer(
             return StremioStreamResponse(emptyList())
         }
 
-        // Concurrently run all enabled plugins with timeout
-        val timeoutMs = (requestTimeoutSec * 1000L).coerceAtLeast(4000L)
+        // Concurrently run all enabled plugins until full execution (0L = no timeout)
+        val timeoutMs = if (requestTimeoutSec <= 0) 0L else (requestTimeoutSec * 1000L).coerceAtLeast(4000L)
         val deferredResults = enabledPlugins.map { plugin ->
             serverScope.async {
                 try {

@@ -18,6 +18,9 @@ import com.example.engine.StreamFormatter
 import com.example.server.ServerService
 import com.example.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -43,7 +46,7 @@ data class MainUiState(
     val sortByQuality: Boolean = true,
     val groupByQuality: Boolean = true,
     val filterOutLowQuality: Boolean = false,
-    val requestTimeoutSec: Int = 12
+    val requestTimeoutSec: Int = 0 // 0 = Unlimited (Runs until code completely finishes)
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -292,22 +295,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     existingTmdbId = if (!query.startsWith("tt") && query.all { it.isDigit() }) query else null
                 )
 
-                val rawList = mutableListOf<com.example.data.model.RawPluginStream>()
-                for (plugin in enabledPlugins) {
-                    val res = pluginRunner.runPlugin(
-                        plugin = plugin,
-                        type = type,
-                        id = query,
-                        season = season,
-                        episode = episode,
-                        tmdbId = resolved.tmdbId,
-                        imdbId = resolved.imdbId,
-                        kitsuId = if (query.startsWith("kitsu")) query.removePrefix("kitsu:") else null,
-                        title = resolved.title,
-                        year = resolved.year,
-                        timeoutMs = 10000
-                    )
-                    rawList.addAll(res)
+                val effectiveTimeout = if (_uiState.value.requestTimeoutSec <= 0) 0L else (_uiState.value.requestTimeoutSec * 1000L)
+                val rawList = kotlinx.coroutines.coroutineScope {
+                    val deferredList = enabledPlugins.map { plugin ->
+                        async {
+                            try {
+                                pluginRunner.runPlugin(
+                                    plugin = plugin,
+                                    type = type,
+                                    id = query,
+                                    season = season,
+                                    episode = episode,
+                                    tmdbId = resolved.tmdbId,
+                                    imdbId = resolved.imdbId,
+                                    kitsuId = if (query.startsWith("kitsu")) query.removePrefix("kitsu:") else null,
+                                    title = resolved.title,
+                                    year = resolved.year,
+                                    timeoutMs = effectiveTimeout
+                                )
+                            } catch (e: Exception) {
+                                emptyList<com.example.data.model.RawPluginStream>()
+                            }
+                        }
+                    }
+                    deferredList.awaitAll().flatten()
                 }
 
                 val formatted = StreamFormatter.formatAndSortStreams(
@@ -349,6 +360,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             filterOutLowQuality = filterOutLowQuality,
             requestTimeoutSec = timeoutSec
         )
+        ServerService.currentSortByQuality = sortByQuality
+        ServerService.currentGroupByQuality = groupByQuality
+        ServerService.currentFilterOutLowQuality = filterOutLowQuality
+        ServerService.currentTimeoutSec = timeoutSec
     }
 
     fun getManifestUrl(): String {

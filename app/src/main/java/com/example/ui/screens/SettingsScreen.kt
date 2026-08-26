@@ -210,10 +210,107 @@ fun SettingsScreen(
                             checked = filterOutLowQuality,
                             onCheckedChange = {
                                 filterOutLowQuality = it
-                                onUpdateSettings(sortByQuality, groupByQuality, filterOutLowQuality, timeoutInput.toIntOrNull() ?: 12)
+                                onUpdateSettings(sortByQuality, groupByQuality, filterOutLowQuality, timeoutInput.toIntOrNull() ?: 0)
                             },
                             colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = HdPrimary)
                         )
+                    }
+                }
+            }
+        }
+
+        // Provider Execution & Timeout Card
+        item {
+            val isUnlimited = (timeoutInput.toIntOrNull() ?: 0) <= 0
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = HdSurface),
+                border = BorderStroke(1.dp, HdBorder)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.Tune, contentDescription = null, tint = HdPrimary, modifier = Modifier.size(20.dp))
+                        Text("Provider Execution & Timeout", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, color = HdTextPrimary))
+                    }
+
+                    Text(
+                        text = "Controls how long the engine waits for JavaScript scrapers and decryption routines to finish executing.",
+                        style = MaterialTheme.typography.bodySmall.copy(color = HdTextSecondary)
+                    )
+
+                    // Unlimited Execution Switch
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Run Until Complete (No Timeout)", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold, color = HdTextPrimary))
+                            Text("Never abort scrapers early; wait for full stream resolution", style = MaterialTheme.typography.bodySmall.copy(color = HdTextSecondary))
+                        }
+                        Switch(
+                            checked = isUnlimited,
+                            onCheckedChange = { unlimited ->
+                                val newTimeout = if (unlimited) 0 else 60
+                                timeoutInput = "$newTimeout"
+                                onUpdateSettings(sortByQuality, groupByQuality, filterOutLowQuality, newTimeout)
+                                Toast.makeText(context, if (unlimited) "Execution set to Unlimited (No Timeouts)" else "Timeout set to 60s", Toast.LENGTH_SHORT).show()
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = HdPrimary)
+                        )
+                    }
+
+                    if (isUnlimited) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = HdSuccessText.copy(alpha = 0.08f),
+                            border = BorderStroke(1.dp, HdSuccessText.copy(alpha = 0.3f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("⚡", fontSize = 16.sp)
+                                Text(
+                                    text = "All scrapers will run in parallel until complete execution without any premature timeout interrupts.",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = HdSuccessText, fontWeight = FontWeight.Medium)
+                                )
+                            }
+                        }
+                    } else {
+                        // Quick Presets for Custom Timeout
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Preset Limits (Seconds):", style = MaterialTheme.typography.labelSmall.copy(color = HdTextSecondary))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(30, 60, 120, 180).forEach { sec ->
+                                    val isSelected = timeoutInput == "$sec"
+                                    Button(
+                                        onClick = {
+                                            timeoutInput = "$sec"
+                                            onUpdateSettings(sortByQuality, groupByQuality, filterOutLowQuality, sec)
+                                            Toast.makeText(context, "Timeout set to ${sec}s", Toast.LENGTH_SHORT).show()
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (isSelected) HdPrimary else HdSurfaceContainer,
+                                            contentColor = if (isSelected) Color.White else HdTextPrimary
+                                        ),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("${sec}s", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

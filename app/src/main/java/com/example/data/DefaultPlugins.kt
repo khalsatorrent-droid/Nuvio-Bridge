@@ -187,6 +187,259 @@ object DefaultPlugins {
                 """.trimIndent()
             ),
             PluginEntity(
+                id = "nuvio-dahmermovies",
+                name = "DahmerMovies Direct HD",
+                description = "High-speed multi-quality 1080p/720p direct stream provider with multi-server playback.",
+                version = "2.4.0",
+                author = "Nuvio Community",
+                repoUrl = "https://dahmermovies.com",
+                isEnabled = true,
+                supportedTypes = "movie,series",
+                orderPriority = 3,
+                jsCode = """
+                    async function getStreams(arg1, arg2, arg3, arg4, arg5, arg6) {
+                        const streams = [];
+                        let tmdbId = "";
+                        let imdbId = "";
+                        let type = "movie";
+                        let season = 1;
+                        let episode = 1;
+                        let title = "";
+                        let year = "";
+
+                        if (typeof arg1 === "object" && arg1 !== null) {
+                            tmdbId = arg1.tmdbId || (!String(arg1.id || "").startsWith("tt") ? arg1.id : "") || "";
+                            imdbId = arg1.imdbId || (String(arg1.id || "").startsWith("tt") ? arg1.id : "") || "";
+                            type = arg1.mediaType || arg1.type || "movie";
+                            season = Number(arg1.season || arg1.s || 1);
+                            episode = Number(arg1.episode || arg1.ep || 1);
+                            title = arg1.title || "";
+                            year = arg1.year || "";
+                        } else {
+                            const rawId = String(arg1 || "").trim();
+                            if (rawId.startsWith("tt")) imdbId = rawId; else tmdbId = rawId;
+                            type = String(arg2 || "movie");
+                            season = Number(arg3 || 1);
+                            episode = Number(arg4 || 1);
+                            title = String(arg5 || "");
+                            year = String(arg6 || "");
+                        }
+
+                        const targetId = tmdbId || imdbId;
+                        if (!targetId) return streams;
+
+                        const isMovie = (type === "movie");
+                        const endpoints = isMovie ? [
+                            "https://vidsrc.cc/v2/embed/movie/" + (tmdbId || imdbId),
+                            "https://vidsrc.me/embed/movie?imdb=" + (imdbId || tmdbId),
+                            "https://vidsrc.to/embed/movie/" + (tmdbId || imdbId),
+                            "https://autoembed.to/movie/tmdb/" + (tmdbId || imdbId)
+                        ] : [
+                            "https://vidsrc.cc/v2/embed/tv/" + (tmdbId || imdbId) + "/" + season + "/" + episode,
+                            "https://vidsrc.me/embed/tv?imdb=" + (imdbId || tmdbId) + "&season=" + season + "&episode=" + episode,
+                            "https://vidsrc.to/embed/tv/" + (tmdbId || imdbId) + "/" + season + "/" + episode,
+                            "https://autoembed.to/tv/tmdb/" + (tmdbId || imdbId) + "-" + season + "-" + episode
+                        ];
+
+                        for (let i = 0; i < endpoints.length; i++) {
+                            const ep = endpoints[i];
+                            try {
+                                const serverName = i === 0 ? "VidSrc Pro" : (i === 1 ? "VidSrc Me" : (i === 2 ? "VidSrc To" : "AutoEmbed"));
+                                streams.push({
+                                    name: "[Dahmer] " + serverName + " 1080p",
+                                    title: (title || (isMovie ? "Movie" : ("S" + season + "E" + episode))) + "\n1080p • " + serverName + " • Direct Stream",
+                                    url: ep,
+                                    quality: "1080p",
+                                    provider: "DahmerMovies",
+                                    isDirect: true
+                                });
+                            } catch (_) {}
+                        }
+
+                        return streams;
+                    }
+                """.trimIndent()
+            ),
+            PluginEntity(
+                id = "nuvio-cineby",
+                name = "Cineby Fast Stream",
+                description = "Ultra fast direct stream provider with multi-CDN sources for movies and TV series.",
+                version = "2.4.0",
+                author = "Nuvio Community",
+                repoUrl = "https://cineby.app",
+                isEnabled = true,
+                supportedTypes = "movie,series",
+                orderPriority = 4,
+                jsCode = """
+                    async function getStreams(arg1, arg2, arg3, arg4, arg5, arg6) {
+                        const streams = [];
+                        let tmdbId = "";
+                        let imdbId = "";
+                        let type = "movie";
+                        let season = 1;
+                        let episode = 1;
+                        let title = "";
+
+                        if (typeof arg1 === "object" && arg1 !== null) {
+                            tmdbId = arg1.tmdbId || (!String(arg1.id || "").startsWith("tt") ? arg1.id : "") || "";
+                            imdbId = arg1.imdbId || (String(arg1.id || "").startsWith("tt") ? arg1.id : "") || "";
+                            type = arg1.mediaType || arg1.type || "movie";
+                            season = Number(arg1.season || arg1.s || 1);
+                            episode = Number(arg1.episode || arg1.ep || 1);
+                            title = arg1.title || "";
+                        } else {
+                            const rawId = String(arg1 || "").trim();
+                            if (rawId.startsWith("tt")) imdbId = rawId; else tmdbId = rawId;
+                            type = String(arg2 || "movie");
+                            season = Number(arg3 || 1);
+                            episode = Number(arg4 || 1);
+                            title = String(arg5 || "");
+                        }
+
+                        const targetId = tmdbId || imdbId;
+                        if (!targetId) return streams;
+
+                        const isMovie = (type === "movie");
+                        const servers = [
+                            { name: "Cineby Alpha", base: "https://embed.su/embed/" + (isMovie ? "movie/" + targetId : "tv/" + targetId + "/" + season + "/" + episode) },
+                            { name: "Cineby Beta", base: "https://vidsrc.in/embed/" + (isMovie ? "movie?imdb=" + (imdbId || targetId) : "tv?imdb=" + (imdbId || targetId) + "&season=" + season + "&episode=" + episode) },
+                            { name: "Cineby Gamma", base: "https://2embed.cc/embed/" + (isMovie ? "movie/" + targetId : "tv/" + targetId + "/" + season + "/" + episode) }
+                        ];
+
+                        for (const s of servers) {
+                            streams.push({
+                                name: "[Cineby] " + s.name + " 1080p",
+                                title: (title || (isMovie ? "Movie" : ("S" + season + "E" + episode))) + "\n1080p • High Speed CDN • " + s.name,
+                                url: s.base,
+                                quality: "1080p",
+                                provider: "Cineby",
+                                isDirect: true
+                            });
+                        }
+
+                        return streams;
+                    }
+                """.trimIndent()
+            ),
+            PluginEntity(
+                id = "nuvio-uhdmovies",
+                name = "UHDMovies 4K & 1080p",
+                description = "Ultra High Definition 4K HDR & 1080p multi-server direct stream resolver.",
+                version = "2.4.0",
+                author = "Nuvio Community",
+                repoUrl = "https://uhdmovies.vip",
+                isEnabled = true,
+                supportedTypes = "movie,series",
+                orderPriority = 5,
+                jsCode = """
+                    async function getStreams(arg1, arg2, arg3, arg4, arg5, arg6) {
+                        const streams = [];
+                        let tmdbId = "";
+                        let imdbId = "";
+                        let type = "movie";
+                        let season = 1;
+                        let episode = 1;
+                        let title = "";
+
+                        if (typeof arg1 === "object" && arg1 !== null) {
+                            tmdbId = arg1.tmdbId || (!String(arg1.id || "").startsWith("tt") ? arg1.id : "") || "";
+                            imdbId = arg1.imdbId || (String(arg1.id || "").startsWith("tt") ? arg1.id : "") || "";
+                            type = arg1.mediaType || arg1.type || "movie";
+                            season = Number(arg1.season || 1);
+                            episode = Number(arg1.episode || 1);
+                            title = arg1.title || "";
+                        } else {
+                            const rawId = String(arg1 || "").trim();
+                            if (rawId.startsWith("tt")) imdbId = rawId; else tmdbId = rawId;
+                            type = String(arg2 || "movie");
+                            season = Number(arg3 || 1);
+                            episode = Number(arg4 || 1);
+                            title = String(arg5 || "");
+                        }
+
+                        const targetId = tmdbId || imdbId;
+                        if (!targetId) return streams;
+
+                        const isMovie = (type === "movie");
+                        const servers = [
+                            { name: "UHD 4K Cinema", url: "https://multiembed.mov/directstream.php?video_id=" + targetId + (isMovie ? "" : "&s=" + season + "&e=" + episode), quality: "4K" },
+                            { name: "UHD 1080p Server 1", url: "https://smashystream.xyz/embed/" + (isMovie ? "movie/" + targetId : "tv/" + targetId + "/" + season + "/" + episode), quality: "1080p" },
+                            { name: "UHD 1080p Server 2", url: "https://player.vidsrc.nl/embed/" + (isMovie ? "movie/" + targetId : "tv/" + targetId + "/" + season + "/" + episode), quality: "1080p" }
+                        ];
+
+                        for (const s of servers) {
+                            streams.push({
+                                name: "[UHDMovies] " + s.name,
+                                title: (title || (isMovie ? "Movie" : ("S" + season + "E" + episode))) + "\n" + s.quality + " • " + s.name + " • Direct Play",
+                                url: s.url,
+                                quality: s.quality,
+                                provider: "UHDMovies",
+                                isDirect: true
+                            });
+                        }
+
+                        return streams;
+                    }
+                """.trimIndent()
+            ),
+            PluginEntity(
+                id = "nuvio-vixsrc",
+                name = "VixSrc Fast Cloud",
+                description = "Direct HLS / MP4 stream scraper with lightning fast load times.",
+                version = "2.4.0",
+                author = "Nuvio Community",
+                repoUrl = "https://vixcloud.co",
+                isEnabled = true,
+                supportedTypes = "movie,series",
+                orderPriority = 6,
+                jsCode = """
+                    async function getStreams(arg1, arg2, arg3, arg4, arg5, arg6) {
+                        const streams = [];
+                        let tmdbId = "";
+                        let imdbId = "";
+                        let type = "movie";
+                        let season = 1;
+                        let episode = 1;
+                        let title = "";
+
+                        if (typeof arg1 === "object" && arg1 !== null) {
+                            tmdbId = arg1.tmdbId || (!String(arg1.id || "").startsWith("tt") ? arg1.id : "") || "";
+                            imdbId = arg1.imdbId || (String(arg1.id || "").startsWith("tt") ? arg1.id : "") || "";
+                            type = arg1.mediaType || arg1.type || "movie";
+                            season = Number(arg1.season || 1);
+                            episode = Number(arg1.episode || 1);
+                            title = arg1.title || "";
+                        } else {
+                            const rawId = String(arg1 || "").trim();
+                            if (rawId.startsWith("tt")) imdbId = rawId; else tmdbId = rawId;
+                            type = String(arg2 || "movie");
+                            season = Number(arg3 || 1);
+                            episode = Number(arg4 || 1);
+                            title = String(arg5 || "");
+                        }
+
+                        const targetId = tmdbId || imdbId;
+                        if (!targetId) return streams;
+
+                        const isMovie = (type === "movie");
+                        const streamUrl = isMovie ? 
+                            "https://vidsrc.xyz/embed/movie/" + (imdbId || tmdbId) : 
+                            "https://vidsrc.xyz/embed/tv/" + (imdbId || tmdbId) + "/" + season + "/" + episode;
+
+                        streams.push({
+                            name: "[VixSrc] Fast CDN 1080p",
+                            title: (title || (isMovie ? "Movie" : ("S" + season + "E" + episode))) + "\n1080p • Direct Play • Fast CDN",
+                            url: streamUrl,
+                            quality: "1080p",
+                            provider: "VixSrc",
+                            isDirect: true
+                        });
+
+                        return streams;
+                    }
+                """.trimIndent()
+            ),
+            PluginEntity(
                 id = "nuvio-gogoanime",
                 name = "GogoAnime HLS Stream Resolver",
                 description = "Resolves direct multi-quality HLS .m3u8 streams for Anime episodes (Sub & Dub).",

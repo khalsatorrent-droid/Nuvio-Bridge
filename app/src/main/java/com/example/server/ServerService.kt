@@ -80,6 +80,10 @@ class ServerService : Service() {
             )
         }
         server?.port = port
+        server?.sortByQuality = currentSortByQuality
+        server?.groupByQuality = currentGroupByQuality
+        server?.filterOutLowQuality = currentFilterOutLowQuality
+        server?.requestTimeoutSec = currentTimeoutSec
 
         val notification = buildNotification(port)
         startForeground(NOTIFICATION_ID, notification)
@@ -171,6 +175,11 @@ class ServerService : Service() {
         const val ACTION_START = "com.example.server.START"
         const val ACTION_STOP = "com.example.server.STOP"
         const val EXTRA_PORT = "extra_port"
+
+        var currentSortByQuality: Boolean = true
+        var currentGroupByQuality: Boolean = true
+        var currentFilterOutLowQuality: Boolean = false
+        var currentTimeoutSec: Int = 0 // 0 = Unlimited
 
         private val _isServerRunningFlow = MutableStateFlow(false)
         val isServerRunningFlow: StateFlow<Boolean> = _isServerRunningFlow.asStateFlow()
