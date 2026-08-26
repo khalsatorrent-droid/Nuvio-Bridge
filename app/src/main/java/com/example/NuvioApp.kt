@@ -34,6 +34,24 @@ class NuvioApp : Application() {
         }
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (::pluginRunner.isInitialized) {
+            pluginRunner.trimMemory()
+        }
+        if (level >= TRIM_MEMORY_MODERATE) {
+            System.gc()
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        if (::pluginRunner.isInitialized) {
+            pluginRunner.trimMemory()
+        }
+        System.gc()
+    }
+
     private fun precreateWebViewCacheDirs() {
         try {
             val appDataDir = applicationInfo.dataDir

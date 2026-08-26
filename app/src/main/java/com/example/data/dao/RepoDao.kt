@@ -39,6 +39,9 @@ interface ServerLogDao {
     @Insert
     suspend fun insertLog(log: ServerLogEntity)
 
+    @Query("DELETE FROM server_logs WHERE id NOT IN (SELECT id FROM server_logs ORDER BY timestamp DESC LIMIT 300)")
+    suspend fun pruneOldLogs()
+
     @Query("DELETE FROM server_logs")
     suspend fun clearAllLogs()
 

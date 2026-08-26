@@ -85,6 +85,9 @@ class PluginRepository(private val db: AppDatabase) {
 
     suspend fun logServerRequest(log: ServerLogEntity) {
         serverLogDao.insertLog(log)
+        try {
+            serverLogDao.pruneOldLogs()
+        } catch (_: Exception) {}
     }
 
     suspend fun clearLogs() {

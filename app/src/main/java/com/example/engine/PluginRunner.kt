@@ -16,8 +16,14 @@ import com.squareup.moshi.Types
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.ConnectionPool
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -33,15 +39,46 @@ class PluginRunner(private val context: Context) {
 
     private val TAG = "PluginRunner"
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val fetchExecutor = Executors.newFixedThreadPool(16)
+    private val fetchExecutor = Executors.newFixedThreadPool(8)
+    private val executionSemaphore = Semaphore(8)
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
     private val streamListAdapter = moshi.adapter<List<RawPluginStream>>(
         Types.newParameterizedType(List::class.java, RawPluginStream::class.java)
     )
 
+    private val cookieStore = ConcurrentHashMap<String, MutableList<Cookie>>()
+    private val inMemoryCookieJar = object : CookieJar {
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+            val host = url.host
+            val list = cookieStore.getOrPut(host) { mutableListOf() }
+            synchronized(list) {
+                for (cookie in cookies) {
+                    list.removeAll { it.name == cookie.name }
+                    list.add(cookie)
+                }
+            }
+        }
+
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val host = url.host
+            val result = mutableListOf<Cookie>()
+            cookieStore[host]?.let { synchronized(it) { result.addAll(it) } }
+            val parts = host.split(".")
+            if (parts.size > 2) {
+                val parentDomain = parts.takeLast(2).joinToString(".")
+                if (parentDomain != host) {
+                    cookieStore[parentDomain]?.let { synchronized(it) { result.addAll(it) } }
+                }
+            }
+            return result
+        }
+    }
+
     private val okHttpClient = OkHttpClient.Builder()
         .dns(RobustDns)
-        .connectTimeout(18, TimeUnit.SECONDS)
+        .cookieJar(inMemoryCookieJar)
+        .connectionPool(ConnectionPool(16, 3, TimeUnit.MINUTES))
+        .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
         .writeTimeout(25, TimeUnit.SECONDS)
         .followRedirects(true)
@@ -73,14 +110,10 @@ class PluginRunner(private val context: Context) {
             "streamtape", "dl.vidsrc", "player.smashy"
         )
 
-        /**
-         * Scans JavaScript code for embedded 32-char TMDB hex API keys.
-         */
         fun extractTmdbApiKey(jsCode: String): String? {
             val pattern = Regex("[0-9a-f]{32}", RegexOption.IGNORE_CASE)
             for (match in pattern.findAll(jsCode)) {
                 val candidate = match.value.lowercase(Locale.ROOT)
-                // Filter out non-keys (all zeros, repeating chars, all same)
                 if (candidate.toSet().size >= 8 && candidate != "00000000000000000000000000000000") {
                     return candidate
                 }
@@ -88,16 +121,12 @@ class PluginRunner(private val context: Context) {
             return null
         }
 
-        /**
-         * Determines whether a provider prefers 'tmdb' or 'imdb' as its primary identifier.
-         */
         fun detectIdType(plugin: PluginEntity): String {
             val name = plugin.name.lowercase(Locale.ROOT)
             val id = plugin.id.lowercase(Locale.ROOT)
             val desc = plugin.description.lowercase(Locale.ROOT)
             val js = plugin.jsCode
 
-            // 1. Explicit ID type keywords in description or name
             if (desc.contains("imdb only") || desc.contains("imdb id") || name.contains("imdb")) {
                 return "imdb"
             }
@@ -105,7 +134,6 @@ class PluginRunner(private val context: Context) {
                 return "tmdb"
             }
 
-            // 2. Hostname / provider name overrides
             for (kw in TMDB_HOSTNAME_OVERRIDES) {
                 if (name.contains(kw) || id.contains(kw)) return "tmdb"
             }
@@ -113,7 +141,6 @@ class PluginRunner(private val context: Context) {
                 if (name.contains(kw) || id.contains(kw)) return "imdb"
             }
 
-            // 3. JS code content scanning
             if (js.contains("external_source=imdb_id") ||
                 js.contains("searchwpjson") ||
                 js.contains("wp-json") ||
@@ -127,7 +154,6 @@ class PluginRunner(private val context: Context) {
                 return "tmdb"
             }
 
-            // Default standard for Nuvio ecosystem is TMDB
             return "tmdb"
         }
     }
@@ -140,33 +166,22 @@ class PluginRunner(private val context: Context) {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun initWebView() {
+        if (webView != null) return
         try {
-            try {
-                val baseCache = context.cacheDir
-                val jsCache = java.io.File(baseCache, "WebView/Default/HTTP Cache/Code Cache/js")
-                val wasmCache = java.io.File(baseCache, "WebView/Default/HTTP Cache/Code Cache/wasm")
-                if (!jsCache.exists()) jsCache.mkdirs()
-                if (!wasmCache.exists()) wasmCache.mkdirs()
-            } catch (e: Exception) {
-                Log.w(TAG, "Cache dir creation note: ${e.message}")
-            }
-
-            val wv = WebView(context.applicationContext)
-            wv.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
-
-            wv.settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
-                allowFileAccess = false
-                allowContentAccess = false
-                cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
-                userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            }
+            val wv = WebView(context)
+            val settings = wv.settings
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.databaseEnabled = true
+            settings.allowFileAccess = false
+            settings.allowContentAccess = false
+            settings.blockNetworkImage = true
+            settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
             wv.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    Log.d(TAG, "WebView JS bridge initialized")
+                    super.onPageFinished(view, url)
+                    Log.d(TAG, "Scraper JS engine initialized successfully")
                 }
             }
 
@@ -177,11 +192,9 @@ class PluginRunner(private val context: Context) {
                 <html>
                 <head>
                 <script>
-                    // Custom Headers shim with full Iterable & Map compatibility
-                    function makeHeaders(headersMap) {
-                        const h = headersMap || {};
+                    function makeHeaders(h) {
                         const normalized = {};
-                        Object.keys(h).forEach(k => {
+                        Object.keys(h || {}).forEach(k => {
                             normalized[k.toLowerCase()] = String(h[k]);
                         });
                         return {
@@ -201,8 +214,7 @@ class PluginRunner(private val context: Context) {
                         };
                     }
 
-                    // Polyfill window.fetch to route through Android OkHttp (bypasses CORS entirely)
-                    const _originalFetch = window.fetch;
+                    // Polyfill window.fetch to route through Android OkHttp (bypasses CORS & geo blocks)
                     window.fetch = async function(url, options = {}) {
                         return new Promise((resolve, reject) => {
                             const reqId = 'fetch_' + Math.random().toString(36).substring(2, 12);
@@ -213,23 +225,26 @@ class PluginRunner(private val context: Context) {
                             });
                             
                             window._fetchCallbacks = window._fetchCallbacks || {};
-                            window._fetchCallbacks[reqId] = function(success, status, body, headersJson) {
-                                if (!success) {
-                                    reject(new Error(body || 'Network request failed'));
-                                    return;
+                            window._fetchCallbacks[reqId] = {
+                                ts: Date.now(),
+                                cb: function(success, status, body, headersJson) {
+                                    if (!success) {
+                                        reject(new Error(body || 'Network request failed'));
+                                        return;
+                                    }
+                                    const headersMap = headersJson ? JSON.parse(headersJson) : {};
+                                    const headersObj = makeHeaders(headersMap);
+                                    resolve({
+                                        ok: status >= 200 && status < 300,
+                                        status: status,
+                                        statusText: status === 200 ? 'OK' : 'Status ' + status,
+                                        text: async () => body,
+                                        json: async () => {
+                                            try { return JSON.parse(body); } catch(e) { return {}; }
+                                        },
+                                        headers: headersObj
+                                    });
                                 }
-                                const headersMap = headersJson ? JSON.parse(headersJson) : {};
-                                const headersObj = makeHeaders(headersMap);
-                                resolve({
-                                    ok: status >= 200 && status < 300,
-                                    status: status,
-                                    statusText: status === 200 ? 'OK' : 'Status ' + status,
-                                    text: async () => body,
-                                    json: async () => {
-                                        try { return JSON.parse(body); } catch(e) { return {}; }
-                                    },
-                                    headers: headersObj
-                                });
                             };
                             
                             NuvioNative.nativeFetch(reqId, url.toString(), optJson);
@@ -238,7 +253,7 @@ class PluginRunner(private val context: Context) {
 
                     window.onNativeFetchResponse = function(reqId, success, status, body, headersJson) {
                         if (window._fetchCallbacks && window._fetchCallbacks[reqId]) {
-                            window._fetchCallbacks[reqId](success, status, body, headersJson);
+                            window._fetchCallbacks[reqId].cb(success, status, body, headersJson);
                             delete window._fetchCallbacks[reqId];
                         }
                     };
@@ -438,9 +453,10 @@ class PluginRunner(private val context: Context) {
                                     toString: (encoder) => {
                                         try {
                                             if (!cipherStr) return "";
+                                            // Handle base64 decoded payload or raw string
                                             if (/^[A-Za-z0-9+/=]+$/.test(cipherStr) && cipherStr.length % 4 === 0) {
                                                 const decoded = atob(cipherStr);
-                                                if (decoded && (/^[ -~\t\r\n]+$/.test(decoded) || decoded.includes('{') || decoded.includes('['))) {
+                                                if (decoded && (/^[ -~\t\r\n]+$/.test(decoded) || decoded.includes('{') || decoded.includes('[') || decoded.includes('http'))) {
                                                     return decoded;
                                                 }
                                             }
@@ -450,11 +466,132 @@ class PluginRunner(private val context: Context) {
                                 };
                             }
                         },
-                        MD5: (str) => ({ toString: () => "" }),
-                        SHA1: (str) => ({ toString: () => "" }),
-                        SHA256: (str) => ({ toString: () => "" }),
-                        SHA512: (str) => ({ toString: () => "" }),
-                        HmacSHA256: (msg, key) => ({ toString: (enc) => "" })
+                        MD5: (str) => {
+                            const s = typeof str === 'string' ? str : (str && str.toString ? str.toString() : '');
+                            function md5cycle(x, k) {
+                                var a = x[0], b = x[1], c = x[2], d = x[3];
+                                function ff(a, b, c, d, x, s, t) { return ((a = a + (b & c | ~b & d) + x + t) << s | a >>> (32 - s)) + b; }
+                                function gg(a, b, c, d, x, s, t) { return ((a = a + (b & d | c & ~d) + x + t) << s | a >>> (32 - s)) + b; }
+                                function hh(a, b, c, d, x, s, t) { return ((a = a + (b ^ c ^ d) + x + t) << s | a >>> (32 - s)) + b; }
+                                function ii(a, b, c, d, x, s, t) { return ((a = a + (c ^ (b | ~d)) + x + t) << s | a >>> (32 - s)) + b; }
+                                a = ff(a, b, c, d, k[0], 7, -680876936); d = ff(d, a, b, c, k[1], 12, -389564586); c = ff(c, d, a, b, k[2], 17, 606105819); b = ff(b, c, d, a, k[3], 22, -1044525330);
+                                a = ff(a, b, c, d, k[4], 7, -176418897); d = ff(d, a, b, c, k[5], 12, 1200080426); c = ff(c, d, a, b, k[6], 17, -1473231341); b = ff(b, c, d, a, k[7], 22, -45705983);
+                                a = ff(a, b, c, d, k[8], 7, 1770035416); d = ff(d, a, b, c, k[9], 12, -1958414417); c = ff(c, d, a, b, k[10], 17, -42063); b = ff(b, c, d, a, k[11], 22, -1990404162);
+                                a = ff(a, b, c, d, k[12], 7, 1804603682); d = ff(d, a, b, c, k[13], 12, -40341101); c = ff(c, d, a, b, k[14], 17, -1502002290); b = ff(b, c, d, a, k[15], 22, 1236535329);
+                                a = gg(a, b, c, d, k[1], 5, -165796510); d = gg(d, a, b, c, k[6], 9, -1069501632); c = gg(c, d, a, b, k[11], 14, 643717713); b = gg(b, c, d, a, k[0], 20, -373897302);
+                                a = gg(a, b, c, d, k[5], 5, -701558691); d = gg(d, a, b, c, k[10], 9, 38016083); c = gg(c, d, a, b, k[15], 14, -660478335); b = gg(b, c, d, a, k[4], 20, -405537848);
+                                a = gg(a, b, c, d, k[9], 5, 568446438); d = gg(d, a, b, c, k[14], 9, -1019803690); c = gg(c, d, a, b, k[3], 14, -187363961); b = gg(b, c, d, a, k[8], 20, 1163531501);
+                                a = gg(a, b, c, d, k[13], 5, -1444681467); d = gg(d, a, b, c, k[2], 9, -51403784); c = gg(c, d, a, b, k[7], 14, 1735328473); b = gg(b, c, d, a, k[12], 20, -1926607734);
+                                a = hh(a, b, c, d, k[5], 4, -378558); d = hh(d, a, b, c, k[8], 11, -2022574463); c = hh(c, d, a, b, k[11], 16, 1839030562); b = hh(b, c, d, a, k[14], 23, -35309556);
+                                a = hh(a, b, c, d, k[1], 4, -1530992060); d = hh(d, a, b, c, k[4], 11, 1272893353); c = hh(c, d, a, b, k[7], 16, -155497632); b = hh(b, c, d, a, k[10], 23, -1094730640);
+                                a = hh(a, b, c, d, k[13], 4, 681279174); d = hh(d, a, b, c, k[0], 11, -358537222); c = hh(c, d, a, b, k[3], 16, -722521979); b = hh(b, c, d, a, k[6], 23, 76029189);
+                                a = hh(a, b, c, d, k[9], 4, -640364487); d = hh(d, a, b, c, k[12], 11, -421815835); c = hh(c, d, a, b, k[15], 16, 530742520); b = hh(b, c, d, a, k[2], 23, -995338651);
+                                a = ii(a, b, c, d, k[0], 6, -198630844); d = ii(d, a, b, c, k[7], 10, 1126891415); c = ii(c, d, a, b, k[14], 15, -1416354905); b = ii(b, c, d, a, k[5], 21, -57434055);
+                                a = ii(a, b, c, d, k[12], 6, 1700485571); d = ii(d, a, b, c, k[3], 10, -1894986606); c = ii(c, d, a, b, k[10], 15, -1051523); b = ii(b, c, d, a, k[1], 21, -2054922799);
+                                a = ii(a, b, c, d, k[8], 6, 1873313359); d = ii(d, a, b, c, k[15], 10, -30611744); c = ii(c, d, a, b, k[6], 15, -1560198380); b = ii(b, c, d, a, k[13], 21, 1309151649);
+                                a = ii(a, b, c, d, k[4], 6, -145523070); d = ii(d, a, b, c, k[11], 10, -1120210379); c = ii(c, d, a, b, k[2], 15, 718787259); b = ii(b, c, d, a, k[9], 21, -343485551);
+                                x[0] = a + x[0]; x[1] = b + x[1]; x[2] = c + x[2]; x[3] = d + x[3];
+                            }
+                            var n = s.length, state = [1732584193, -271733879, -1732584194, 271733878], i;
+                            var tail = [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0];
+                            for (i = 64; i <= n; i += 64) {
+                                var block = [];
+                                for (var j = 0; j < 16; j++) {
+                                    var idx = (i - 64) + (j * 4);
+                                    block[j] = (s.charCodeAt(idx)) | (s.charCodeAt(idx + 1) << 8) | (s.charCodeAt(idx + 2) << 16) | (s.charCodeAt(idx + 3) << 24);
+                                }
+                                md5cycle(state, block);
+                            }
+                            var rem = n % 64;
+                            for (i = 0; i < rem; i++) {
+                                tail[i >> 2] |= s.charCodeAt(n - rem + i) << ((i % 4) * 8);
+                            }
+                            tail[rem >> 2] |= 0x80 << ((rem % 4) * 8);
+                            if (rem > 55) {
+                                md5cycle(state, tail);
+                                for (i = 0; i < 16; i++) tail[i] = 0;
+                            }
+                            tail[14] = n * 8;
+                            md5cycle(state, tail);
+                            function rhex(n) {
+                                var hex = "0123456789abcdef", s = "";
+                                for (var j = 0; j <= 3; j++) s += hex.charAt((n >> (j * 8 + 4)) & 0x0F) + hex.charAt((n >> (j * 8)) & 0x0F);
+                                return s;
+                            }
+                            const hex = rhex(state[0]) + rhex(state[1]) + rhex(state[2]) + rhex(state[3]);
+                            return { toString: (enc) => enc === CryptoJSObj.enc.Base64 ? btoa(hex.match(/\w{2}/g).map(a => String.fromCharCode(parseInt(a, 16))).join('')) : hex };
+                        },
+                        SHA1: (str) => ({ toString: () => CryptoJSObj.SHA256(str).toString().substring(0, 40) }),
+                        SHA256: (str) => {
+                            const s = typeof str === 'string' ? str : (str && str.toString ? str.toString() : '');
+                            function sha256(ascii) {
+                                function rightRotate(value, amount) { return (value>>>amount) | (value<<(32 - amount)); }
+                                var mathPow = Math.pow;
+                                var maxWord = mathPow(2, 32);
+                                var lengthProperty = 'length'
+                                var i, j;
+                                var result = ''
+                                var words = [];
+                                var asciiBitLength = ascii[lengthProperty]*8;
+                                var hash = [], k = [];
+                                var primeCounter = 0;
+                                var isComposite = {};
+                                for (var candidate = 2; primeCounter < 64; candidate++) {
+                                    if (!isComposite[candidate]) {
+                                        for (i = 0; i < 313; i += candidate) { isComposite[i] = candidate; }
+                                        hash[primeCounter] = (mathPow(candidate, .5)*maxWord)|0;
+                                        k[primeCounter++] = (mathPow(candidate, 1/3)*maxWord)|0;
+                                    }
+                                }
+                                ascii += '\x80'
+                                while (ascii[lengthProperty]%64 - 56) ascii += '\x00'
+                                for (i = 0; i < ascii[lengthProperty]; i++) {
+                                    j = ascii.charCodeAt(i);
+                                    if (j>>8) return;
+                                    words[i>>2] |= j << ((3 - i)%4)*8;
+                                }
+                                words[words[lengthProperty]] = ((asciiBitLength/maxWord)|0);
+                                words[words[lengthProperty]] = (asciiBitLength)
+                                for (j = 0; j < words[lengthProperty];) {
+                                    var w = words.slice(j, j += 16);
+                                    var oldHash = hash;
+                                    hash = hash.slice(0, 8);
+                                    for (i = 0; i < 64; i++) {
+                                        var i2 = i + j;
+                                        var w15 = w[i - 15], w2 = w[i - 2];
+                                        var a = hash[0], e = hash[4];
+                                        var temp1 = hash[7]
+                                            + (rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25))
+                                            + ((e & hash[5]) ^ ((~e) & hash[6]))
+                                            + k[i]
+                                            + (w[i] = (i < 16) ? w[i] : (
+                                                    w[i - 16]
+                                                    + (rightRotate(w15, 7) ^ rightRotate(w15, 18) ^ (w15>>>3))
+                                                    + w[i - 7]
+                                                    + (rightRotate(w2, 17) ^ rightRotate(w2, 19) ^ (w2>>>10))
+                                                )|0
+                                            );
+                                        var temp2 = (rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22))
+                                            + ((a & hash[1]) ^ (a & hash[2]) ^ (hash[1] & hash[2]));
+                                        hash = [(temp1 + temp2)|0].concat(hash);
+                                        hash[4] = (hash[4] + temp1)|0;
+                                    }
+                                    for (i = 0; i < 8; i++) { hash[i] = (hash[i] + oldHash[i])|0; }
+                                }
+                                for (i = 0; i < 8; i++) {
+                                    for (j = 3; j + 1; j--) {
+                                        var b = (hash[i]>>(j*8))&255;
+                                        result += ((b < 16) ? 0 : '') + b.toString(16);
+                                    }
+                                }
+                                return result;
+                            }
+                            const hex = sha256(s) || "";
+                            return { toString: (enc) => enc === CryptoJSObj.enc.Base64 ? btoa(hex.match(/\w{2}/g).map(a => String.fromCharCode(parseInt(a, 16))).join('')) : hex };
+                        },
+                        SHA512: (str) => ({ toString: () => CryptoJSObj.SHA256(str).toString() }),
+                        HmacSHA256: (msg, key) => CryptoJSObj.SHA256(String(msg) + String(key)),
+                        HmacMD5: (msg, key) => CryptoJSObj.MD5(String(msg) + String(key))
                     };
 
                     window.CryptoJS = CryptoJSObj;
@@ -661,8 +798,9 @@ class PluginRunner(private val context: Context) {
                             const mediaType = params.mediaType || params.type || "movie";
                             const season = (params.season !== undefined && params.season !== null) ? Number(params.season) : 1;
                             const episode = (params.episode !== undefined && params.episode !== null) ? Number(params.episode) : 1;
+                            const title = params.title || "";
+                            const year = params.year || "";
 
-                            // Environmental shims for CommonJS, ES modules, and Browser Global environments
                             let module = { exports: {} };
                             let exports = module.exports;
                             let global = window;
@@ -672,7 +810,6 @@ class PluginRunner(private val context: Context) {
                             window.SCRAPER_SETTINGS = window.SCRAPER_SETTINGS || {};
                             const requireShim = getRequireShim();
 
-                            // Clean / transform ES module exports if present
                             let cleanedCode = jsCode;
                             if (cleanedCode.includes("export default")) {
                                 cleanedCode = cleanedCode.replace(/export\s+default\s+/g, "module.exports = ");
@@ -694,9 +831,10 @@ class PluginRunner(private val context: Context) {
                                 const isMovie = (mediaType === "movie" || rawType === "movie");
                                 const season = (params.season !== undefined && params.season !== null) ? Number(params.season) : (isMovie ? null : 1);
                                 const episode = (params.episode !== undefined && params.episode !== null) ? Number(params.episode) : (isMovie ? null : 1);
+                                const title = params.title || "";
+                                const year = params.year || "";
 
                                 let handler = null;
-                                // 1. Common named exports
                                 if (typeof getStreams === "function") handler = getStreams;
                                 else if (typeof scrape === "function") handler = scrape;
                                 else if (module && module.exports && typeof module.exports.getStreams === "function") handler = module.exports.getStreams;
@@ -712,13 +850,14 @@ class PluginRunner(private val context: Context) {
                                 else if (typeof getStream === "function") handler = getStream;
                                 else if (typeof getSources === "function") handler = getSources;
                                 else if (typeof extract === "function") handler = extract;
+                                else if (typeof extractStreams === "function") handler = extractStreams;
+                                else if (typeof getMedia === "function") handler = getMedia;
                                 else if (typeof streams === "function") handler = streams;
                                 else if (typeof stream === "function") handler = stream;
 
-                                // 2. Dynamic export inspection
                                 if (!handler && module && module.exports && typeof module.exports === "object") {
                                     for (const k of Object.keys(module.exports)) {
-                                        if (typeof module.exports[k] === "function" && /stream|source|extract/i.test(k)) {
+                                        if (typeof module.exports[k] === "function" && /stream|source|extract|scrape/i.test(k)) {
                                             handler = module.exports[k];
                                             break;
                                         }
@@ -726,7 +865,7 @@ class PluginRunner(private val context: Context) {
                                 }
                                 if (!handler && typeof exports === "object") {
                                     for (const k of Object.keys(exports)) {
-                                        if (typeof exports[k] === "function" && /stream|source|extract/i.test(k)) {
+                                        if (typeof exports[k] === "function" && /stream|source|extract|scrape/i.test(k)) {
                                             handler = exports[k];
                                             break;
                                         }
@@ -740,133 +879,156 @@ class PluginRunner(private val context: Context) {
 
                                 let result = null;
 
+                                function hasStreams(r) {
+                                    if (!r) return false;
+                                    if (Array.isArray(r)) return r.length > 0;
+                                    if (typeof r === 'object') {
+                                        const list = r.streams || r.sources || r.results || r.data || r.links || r.list || r.items;
+                                        if (Array.isArray(list)) return list.length > 0;
+                                        return Object.keys(r).length > 0;
+                                    }
+                                    return false;
+                                }
+
+                                const targetId = tmdbId || primaryId || imdbId;
+
                                 if (isMovie) {
-                                    // === MOVIE STRATEGIES ===
-                                    const targetId = tmdbId || primaryId || imdbId;
-
-                                    // Movie Strategy 1: handler(targetId, "movie")
+                                    // Movie Strategy 1: Nuvio 6-arg with Title and Year: handler(targetId, "movie", 1, 1, title, year)
                                     try {
-                                        const r0 = await handler(targetId, "movie");
-                                        if (r0 && (Array.isArray(r0) ? r0.length > 0 : (typeof r0 === 'object' && Object.keys(r0).length > 0))) {
-                                            result = r0;
+                                        const r = await handler(targetId, "movie", 1, 1, title, year);
+                                        if (hasStreams(r)) result = r;
+                                    } catch(_) {}
+
+                                    // Movie Strategy 2: handler(targetId, "movie", null, null, title, year)
+                                    if (!hasStreams(result)) {
+                                        try {
+                                            const r = await handler(targetId, "movie", null, null, title, year);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
+                                    }
+
+                                    // Movie Strategy 3: Standard Nuvio 2-arg: handler(targetId, "movie")
+                                    if (!hasStreams(result)) {
+                                        try {
+                                            const r = await handler(targetId, "movie");
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
+                                    }
+
+                                    // Movie Strategy 4: Object params: handler(params)
+                                    if (!hasStreams(result)) {
+                                        try {
+                                            const r = await handler(params);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
+                                    }
+
+                                    // Movie Strategy 5: handler(targetId, "movie", title, year)
+                                    if (!hasStreams(result) && title) {
+                                        try {
+                                            const r = await handler(targetId, "movie", title, year);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
+                                    }
+
+                                    // Movie Strategy 6: handler(title, "movie", year)
+                                    if (!hasStreams(result) && title) {
+                                        try {
+                                            const r = await handler(title, "movie", year);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
+                                    }
+
+                                    // Movie Strategy 7: Alternate ID -> handler(altId, "movie", 1, 1, title, year)
+                                    if (!hasStreams(result) && altId && altId !== targetId) {
+                                        try {
+                                            const r = await handler(altId, "movie", 1, 1, title, year);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
+                                        if (!hasStreams(result)) {
+                                            try {
+                                                const r = await handler(altId, "movie");
+                                                if (hasStreams(r)) result = r;
+                                            } catch(_) {}
                                         }
-                                    } catch (e0) {}
-
-                                    // Movie Strategy 2: handler(targetId, "movie", null, null)
-                                    if (!result || (Array.isArray(result) && result.length === 0)) {
-                                        try {
-                                            const r1 = await handler(targetId, "movie", null, null);
-                                            if (r1 && (Array.isArray(r1) ? r1.length > 0 : true)) {
-                                                result = r1;
-                                            }
-                                        } catch (e1) {}
                                     }
 
-                                    // Movie Strategy 3: Object params -> handler(params)
-                                    if (!result || (Array.isArray(result) && result.length === 0)) {
+                                    // Movie Strategy 8: Stremio format
+                                    if (!hasStreams(result)) {
                                         try {
-                                            const r2 = await handler(params);
-                                            if (r2 && (Array.isArray(r2) ? r2.length > 0 : true)) {
-                                                result = r2;
-                                            }
-                                        } catch (e2) {}
-                                    }
-
-                                    // Movie Strategy 4: Alternate ID -> handler(altId, "movie")
-                                    if ((!result || (Array.isArray(result) && result.length === 0)) && altId && altId !== targetId) {
-                                        try {
-                                            const r3 = await handler(altId, "movie");
-                                            if (r3 && (Array.isArray(r3) ? r3.length > 0 : true)) {
-                                                result = r3;
-                                            }
-                                        } catch (e3) {}
+                                            const r = await handler("movie", targetId || imdbId);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
                                     }
                                 } else {
-                                    // === TV SHOWS / SERIES / ANIME STRATEGIES (ALWAYS PASS EXACT S & EP) ===
-                                    const targetId = tmdbId || primaryId || imdbId;
-                                    const s = season !== null ? season : 1;
-                                    const ep = episode !== null ? episode : 1;
+                                    // TV / Series strategies
+                                    const s = (season !== null && season !== undefined) ? season : 1;
+                                    const ep = (episode !== null && episode !== undefined) ? episode : 1;
 
-                                    // Series Strategy 1: Standard Nuvio 4-parameter call -> handler(targetId, "tv", s, ep)
+                                    // Series Strategy 1: Nuvio 6-arg with Title and Year: handler(targetId, "tv", s, ep, title, year)
                                     try {
-                                        const r1 = await handler(targetId, "tv", s, ep);
-                                        if (r1 && (Array.isArray(r1) ? r1.length > 0 : (typeof r1 === 'object' && Object.keys(r1).length > 0))) {
-                                            result = r1;
-                                        }
-                                    } catch (e1) {
-                                        console.warn("[Runner] handler(targetId, 'tv', s, ep) error: " + e1.message);
+                                        const r = await handler(targetId, "tv", s, ep, title, year);
+                                        if (hasStreams(r)) result = r;
+                                    } catch(_) {}
+
+                                    // Series Strategy 2: Standard Nuvio 4-arg: handler(targetId, "tv", s, ep)
+                                    if (!hasStreams(result)) {
+                                        try {
+                                            const r = await handler(targetId, "tv", s, ep);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
                                     }
 
-                                    // Series Strategy 2: Nuvio 4-parameter with rawType e.g. "series" or "anime" -> handler(targetId, rawType, s, ep)
-                                    if ((!result || (Array.isArray(result) && result.length === 0)) && rawType !== "tv") {
+                                    // Series Strategy 3: With rawType e.g. "series": handler(targetId, rawType, s, ep, title, year)
+                                    if (!hasStreams(result) && rawType !== "tv") {
                                         try {
-                                            const r2 = await handler(targetId, rawType, s, ep);
-                                            if (r2 && (Array.isArray(r2) ? r2.length > 0 : true)) {
-                                                result = r2;
-                                            }
-                                        } catch (e2) {
-                                            console.warn("[Runner] handler(targetId, rawType, s, ep) error: " + e2.message);
-                                        }
-                                    }
-
-                                    // Series Strategy 3: Object params -> handler(params)
-                                    if (!result || (Array.isArray(result) && result.length === 0)) {
-                                        try {
-                                            const r3 = await handler(params);
-                                            if (r3 && (Array.isArray(r3) ? r3.length > 0 : true)) {
-                                                result = r3;
-                                            }
-                                        } catch (e3) {
-                                            console.warn("[Runner] handler(params) error: " + e3.message);
-                                        }
-                                    }
-
-                                    // Series Strategy 4: IMDB ID explicitly -> handler(imdbId, "tv", s, ep) or handler(imdbId, "series", s, ep)
-                                    if ((!result || (Array.isArray(result) && result.length === 0)) && imdbId && imdbId !== targetId) {
-                                        try {
-                                            const r4 = await handler(imdbId, "tv", s, ep);
-                                            if (r4 && (Array.isArray(r4) ? r4.length > 0 : true)) {
-                                                result = r4;
-                                            }
-                                        } catch (e4) {}
-                                        if (!result || (Array.isArray(result) && result.length === 0)) {
+                                            const r = await handler(targetId, rawType, s, ep, title, year);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
+                                        if (!hasStreams(result)) {
                                             try {
-                                                const r4b = await handler(imdbId, "series", s, ep);
-                                                if (r4b && (Array.isArray(r4b) ? r4b.length > 0 : true)) {
-                                                    result = r4b;
-                                                }
-                                            } catch (e4b) {}
+                                                const r = await handler(targetId, rawType, s, ep);
+                                                if (hasStreams(r)) result = r;
+                                            } catch(_) {}
                                         }
                                     }
 
-                                    // Series Strategy 5: Alternate ID -> handler(altId, mediaType, s, ep)
-                                    if ((!result || (Array.isArray(result) && result.length === 0)) && altId && altId !== targetId && altId !== imdbId) {
+                                    // Series Strategy 4: Object params: handler(params)
+                                    if (!hasStreams(result)) {
                                         try {
-                                            const r5 = await handler(altId, mediaType, s, ep);
-                                            if (r5 && (Array.isArray(r5) ? r5.length > 0 : true)) {
-                                                result = r5;
-                                            }
-                                        } catch (e5) {}
+                                            const r = await handler(params);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
                                     }
 
-                                    // Series Strategy 6: Positional mediaType first -> handler(mediaType, targetId, s, ep)
-                                    if (!result || (Array.isArray(result) && result.length === 0)) {
+                                    // Series Strategy 5: By Title & Episode: handler(title, "tv", s, ep, year)
+                                    if (!hasStreams(result) && title) {
                                         try {
-                                            const r6 = await handler(mediaType, targetId, s, ep);
-                                            if (r6 && (Array.isArray(r6) ? r6.length > 0 : true)) {
-                                                result = r6;
-                                            }
-                                        } catch (e6) {}
+                                            const r = await handler(title, "tv", s, ep, year);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
                                     }
 
-                                    // Series Strategy 7: Stremio format (type, id:s:e)
-                                    if (!result || (Array.isArray(result) && result.length === 0)) {
+                                    // Series Strategy 6: IMDB ID explicitly: handler(imdbId, "tv", s, ep, title, year)
+                                    if (!hasStreams(result) && imdbId && imdbId !== targetId) {
                                         try {
-                                            const r7 = await handler(rawType, (targetId || imdbId) + ":" + s + ":" + ep);
-                                            if (r7 && (Array.isArray(r7) ? r7.length > 0 : true)) {
-                                                result = r7;
-                                            }
-                                        } catch (e7) {}
+                                            const r = await handler(imdbId, "tv", s, ep, title, year);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
+                                        if (!hasStreams(result)) {
+                                            try {
+                                                const r = await handler(imdbId, "tv", s, ep);
+                                                if (hasStreams(r)) result = r;
+                                            } catch(_) {}
+                                        }
+                                    }
+
+                                    // Series Strategy 7: Stremio format
+                                    if (!hasStreams(result)) {
+                                        try {
+                                            const r = await handler(rawType, (targetId || imdbId) + ":" + s + ":" + ep);
+                                            if (hasStreams(r)) result = r;
+                                        } catch(_) {}
                                     }
                                 }
 
@@ -875,14 +1037,34 @@ class PluginRunner(private val context: Context) {
 
                             let result = await runnerFn(module, exports, global, window, requireShim, params);
                             if (!Array.isArray(result) && result && typeof result === 'object') {
-                                result = result.streams || result.sources || [result];
+                                result = result.streams || result.sources || result.results || result.data || result.links || result.list || result.items || [result];
                             }
 
                             const rawList = Array.isArray(result) ? result : [];
                             const finalStreams = rawList.map(s => {
-                                if (!s || typeof s !== 'object') return null;
-                                let streamUrl = s.url || s.file || s.streamUrl || s.link || s.stream || s.externalUrl || '';
-                                let infoHash = s.infoHash || s.infohash || s.hash || null;
+                                if (!s) return null;
+                                if (typeof s === 'string') {
+                                    const u = s.trim();
+                                    if (!u || u.includes("undefined") || u.endsWith("/null")) return null;
+                                    let hash = null;
+                                    if (u.startsWith("magnet:")) {
+                                        const m = u.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
+                                        if (m && m[1]) hash = m[1].toLowerCase();
+                                    }
+                                    return {
+                                        name: "[Nuvio] Stream Source",
+                                        title: "1080p • Direct Playback",
+                                        url: hash ? null : u,
+                                        infoHash: hash,
+                                        quality: "1080p",
+                                        provider: "Nuvio",
+                                        isDirect: true
+                                    };
+                                }
+                                if (typeof s !== 'object') return null;
+
+                                let streamUrl = s.url || s.file || s.streamUrl || s.link || s.stream || s.src || s.source || s.video || s.videoUrl || s.playbackUrl || s.directUrl || s.download || s.magnet || s.m3u8 || s.mp4 || s.uri || s.href || s.externalUrl || '';
+                                let infoHash = s.infoHash || s.infohash || s.hash || s.torrentHash || s.btih || null;
                                 let fileIdx = (s.fileIdx !== undefined && s.fileIdx !== null) ? Number(s.fileIdx) : null;
 
                                 if (!streamUrl && !infoHash) return null;
@@ -939,16 +1121,20 @@ class PluginRunner(private val context: Context) {
                                     })).filter(sub => !!sub.url);
                                 }
 
+                                const rawQuality = s.quality || s.resolution || s.res || (s.height ? s.height + 'p' : null) || s.label || '1080p';
+                                const providerName = s.provider || s.server || s.name || s.source || s.host || s.hoster || "Nuvio";
+                                const sizeStr = s.size || s.fileSize || s.formattedSize || null;
+
                                 return {
-                                    name: s.name || s.label || s.server || s.provider || "[Nuvio] Source",
-                                    title: s.title || s.name || s.description || s.quality || "Stream Source",
+                                    name: s.name || s.label || s.server || s.provider || ("[Nuvio] " + providerName),
+                                    title: s.title || s.name || s.description || (rawQuality + (sizeStr ? " • " + sizeStr : "") + " • Direct Stream"),
                                     url: streamUrl || null,
                                     infoHash: infoHash,
                                     fileIdx: fileIdx,
-                                    quality: s.quality || (s.resolution ? s.resolution + 'p' : '1080p'),
-                                    provider: s.provider || s.server || s.name || "Nuvio",
-                                    size: s.size || null,
-                                    format: s.format || null,
+                                    quality: rawQuality,
+                                    provider: providerName,
+                                    size: sizeStr,
+                                    format: s.format || s.type || null,
                                     subtitles: (extractedSubs && extractedSubs.length > 0) ? extractedSubs : null,
                                     headers: extractedHeaders,
                                     isDirect: s.isDirect !== undefined ? s.isDirect : true
@@ -988,7 +1174,6 @@ class PluginRunner(private val context: Context) {
 
                     var effectiveUrl = url
 
-                    // Automatic TMDB API key parameter injection if accessing TMDB API directly
                     if (effectiveUrl.contains("api.themoviedb.org")) {
                         try {
                             val uri = Uri.parse(effectiveUrl)
@@ -1002,6 +1187,12 @@ class PluginRunner(private val context: Context) {
 
                     val headersBuilder = okhttp3.Headers.Builder()
                     headersBuilder.add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                    headersBuilder.add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+                    headersBuilder.add("Accept-Language", "en-US,en;q=0.9")
+                    headersBuilder.add("Sec-Ch-Ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
+                    headersBuilder.add("Sec-Ch-Ua-Mobile", "?0")
+                    headersBuilder.add("Sec-Ch-Ua-Platform", "\"Windows\"")
+
                     if (headersObj != null) {
                         val keys = headersObj.keys()
                         while (keys.hasNext()) {
@@ -1024,14 +1215,7 @@ class PluginRunner(private val context: Context) {
 
                     val response = okHttpClient.newCall(requestBuilder.build()).execute()
                     val statusCode = response.code
-                    val responseBody = response.body?.use { body ->
-                        val source = body.source()
-                        val maxBytes = 4L * 1024L * 1024L // 4MB safe buffer limit
-                        source.request(maxBytes)
-                        val buffer = source.buffer
-                        val byteCount = minOf(buffer.size, maxBytes)
-                        buffer.clone().readString(byteCount, Charsets.UTF_8)
-                    } ?: ""
+                    val responseBody = response.body?.string() ?: ""
 
                     val resHeadersObj = JSONObject()
                     for (name in response.headers.names()) {
@@ -1080,6 +1264,26 @@ class PluginRunner(private val context: Context) {
         }
     }
 
+    fun trimMemory() {
+        mainHandler.post {
+            try {
+                webView?.evaluateJavascript("""
+                    try {
+                        if (window._fetchCallbacks) {
+                            const now = Date.now();
+                            for (let k in window._fetchCallbacks) {
+                                if (window._fetchCallbacks[k] && window._fetchCallbacks[k].ts && (now - window._fetchCallbacks[k].ts > 30000)) {
+                                    delete window._fetchCallbacks[k];
+                                }
+                            }
+                        }
+                    } catch(_) {}
+                """.trimIndent(), null)
+                webView?.clearCache(false)
+            } catch (_: Exception) {}
+        }
+    }
+
     suspend fun runPlugin(
         plugin: PluginEntity,
         type: String,
@@ -1092,7 +1296,7 @@ class PluginRunner(private val context: Context) {
         title: String? = null,
         year: String? = null,
         timeoutMs: Long = 20000L
-    ): List<RawPluginStream> {
+    ): List<RawPluginStream> = executionSemaphore.withPermit {
         val requestId = "req_${UUID.randomUUID().toString().replace("-", "")}"
         val deferred = CompletableDeferred<List<RawPluginStream>>()
         pendingRequests[requestId] = deferred
@@ -1137,6 +1341,6 @@ class PluginRunner(private val context: Context) {
         }
 
         pendingRequests.remove(requestId)
-        return result ?: emptyList()
+        return@withPermit result ?: emptyList()
     }
 }

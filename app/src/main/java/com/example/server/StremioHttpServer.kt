@@ -189,8 +189,27 @@ class StremioHttpServer(
         }
     }
 
+    private val MAX_CACHE_ENTRIES = 30
     private val responseCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, StremioStreamResponse>>()
     private val CACHE_TTL_MS = 30 * 60 * 1000L // 30 minutes
+
+    private fun cacheResponse(key: String, response: StremioStreamResponse) {
+        val now = System.currentTimeMillis()
+        if (responseCache.size >= MAX_CACHE_ENTRIES) {
+            val iterator = responseCache.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (now - entry.value.first > CACHE_TTL_MS) {
+                    iterator.remove()
+                }
+            }
+            if (responseCache.size >= MAX_CACHE_ENTRIES) {
+                val oldestKey = responseCache.minByOrNull { it.value.first }?.key
+                if (oldestKey != null) responseCache.remove(oldestKey)
+            }
+        }
+        responseCache[key] = Pair(now, response)
+    }
 
     suspend fun handleStreamRequest(path: String): StremioStreamResponse {
         val clean = path.removePrefix("/stream/").removeSuffix(".json")
@@ -343,8 +362,9 @@ class StremioHttpServer(
 
         val response = StremioStreamResponse(streams = formattedStreams)
         if (formattedStreams.isNotEmpty()) {
-            responseCache[cacheKey] = Pair(System.currentTimeMillis(), response)
+            cacheResponse(cacheKey, response)
         }
+        pluginRunner.trimMemory()
         return response
     }
 

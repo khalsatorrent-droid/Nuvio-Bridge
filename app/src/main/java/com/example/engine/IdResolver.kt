@@ -204,23 +204,35 @@ object IdResolver {
             }
         }
 
-        // 3. If we have TMDB ID but need IMDB ID, query TMDB external_ids endpoint
-        if (!tmdb.isNullOrEmpty() && imdb.isNullOrEmpty()) {
+        // 3. If we have TMDB ID but need IMDB ID or metadata, query TMDB endpoints
+        if (!tmdb.isNullOrEmpty() && (imdb.isNullOrEmpty() || resolvedTitle == null || resolvedYear == null)) {
             try {
                 val tmdbEndpoint = if (type == "movie") "movie" else "tv"
-                val url = "https://api.themoviedb.org/3/$tmdbEndpoint/$tmdb/external_ids?api_key=$effectiveKey"
-                val request = Request.Builder().url(url).build()
+                
+                // Get title, year, and external IDs in one shot or sequentially
+                val detailsUrl = "https://api.themoviedb.org/3/$tmdbEndpoint/$tmdb?api_key=$effectiveKey&append_to_response=external_ids"
+                val request = Request.Builder().url(detailsUrl).build()
                 val response = client.newCall(request).execute()
                 val body = response.body?.string()
                 if (!body.isNullOrEmpty()) {
                     val json = JSONObject(body)
-                    val foundImdb = json.optString("imdb_id", "")
-                    if (foundImdb.startsWith("tt")) {
+                    if (resolvedTitle == null) {
+                        resolvedTitle = json.optString("title", json.optString("name", null))
+                    }
+                    if (resolvedYear == null) {
+                        val releaseDate = json.optString("release_date", json.optString("first_air_date", null))
+                        if (!releaseDate.isNullOrEmpty() && releaseDate.length >= 4) {
+                            resolvedYear = releaseDate.take(4)
+                        }
+                    }
+                    val extIds = json.optJSONObject("external_ids")
+                    val foundImdb = extIds?.optString("imdb_id", "") ?: json.optString("imdb_id", "")
+                    if (foundImdb.startsWith("tt") && imdb.isNullOrEmpty()) {
                         imdb = foundImdb
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "TMDB external_ids lookup failed for $tmdb: ${e.message}")
+                Log.w(TAG, "TMDB details & external_ids lookup failed for $tmdb: ${e.message}")
             }
         }
 
