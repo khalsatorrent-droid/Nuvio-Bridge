@@ -79,10 +79,10 @@ class PluginRunner(private val context: Context) {
     private val okHttpClient = OkHttpClient.Builder()
         .dns(RobustDns)
         .cookieJar(inMemoryCookieJar)
-        .connectionPool(ConnectionPool(32, 10, TimeUnit.MINUTES))
-        .connectTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .retryOnConnectionFailure(true)
@@ -519,26 +519,24 @@ class PluginRunner(private val context: Context) {
 
                     window.executePlugin = async function(reqId, jsCode, paramsJson) {
                         try {
-                            NuvioNative.logStep("EXEC", "Parse Parameters", "Received request params for " + reqId, "INFO", "");
-                            const params = JSON.parse(paramsJson);
+                            const params = JSON.parse(paramsJson || "{}");
                             const primaryId = params.primaryId || params.tmdbId || params.imdbId || params.id || "";
-                            const altId = params.altId || (primaryId === params.tmdbId ? params.imdbId : params.tmdbId) || "";
-                            const mediaType = params.mediaType || params.type || "movie";
+                            const altId = params.altId || "";
+                            const tmdbId = params.tmdbId || "";
+                            const imdbId = params.imdbId || "";
+                            const rawType = params.type || "movie";
+                            const mediaType = (rawType === "movie") ? "movie" : (params.mediaType || "tv");
+                            const isMovie = (mediaType === "movie" || rawType === "movie");
                             const season = (params.season !== undefined && params.season !== null) ? Number(params.season) : 1;
                             const episode = (params.episode !== undefined && params.episode !== null) ? Number(params.episode) : 1;
                             const title = params.title || "";
                             const year = params.year || "";
 
-                            let module = { exports: {} };
-                            let exports = module.exports;
-                            let global = window;
-                            window.module = module;
-                            window.exports = exports;
-                            window.global = window;
-                            window.SCRAPER_SETTINGS = window.SCRAPER_SETTINGS || {};
+                            const module = { exports: {} };
+                            const exports = module.exports;
                             const requireShim = getRequireShim();
 
-                            let cleanedCode = jsCode;
+                            let cleanedCode = jsCode || "";
                             if (cleanedCode.includes("export default")) {
                                 cleanedCode = cleanedCode.replace(/export\s+default\s+/g, "module.exports = ");
                             }
@@ -546,148 +544,97 @@ class PluginRunner(private val context: Context) {
                                 cleanedCode = cleanedCode.replace(/export\s+(async\s+function|function|const|let|var)\s+/g, "$1 ");
                             }
 
+                            const harness = [
+                                "let handler = null;",
+                                "if (typeof getStreams === 'function') handler = getStreams;",
+                                "else if (typeof scrape === 'function') handler = scrape;",
+                                "else if (module && module.exports && typeof module.exports.getStreams === 'function') handler = module.exports.getStreams;",
+                                "else if (module && module.exports && typeof module.exports.scrape === 'function') handler = module.exports.scrape;",
+                                "else if (module && typeof module.exports === 'function') handler = module.exports;",
+                                "else if (exports && typeof exports.getStreams === 'function') handler = exports.getStreams;",
+                                "else if (exports && typeof exports.scrape === 'function') handler = exports.scrape;",
+                                "else if (exports && typeof exports.default === 'function') handler = exports.default;",
+                                "else if (typeof window !== 'undefined' && typeof window.getStreams === 'function') handler = window.getStreams;",
+                                "else if (typeof window !== 'undefined' && typeof window.scrape === 'function') handler = window.scrape;",
+                                "else if (typeof getStream === 'function') handler = getStream;",
+                                "else if (typeof getSources === 'function') handler = getSources;",
+                                "else if (typeof extract === 'function') handler = extract;",
+                                "else if (typeof extractStreams === 'function') handler = extractStreams;",
+                                "else if (typeof streams === 'function') handler = streams;",
+                                "if (!handler && module && module.exports && typeof module.exports === 'object') {",
+                                "    for (const k of Object.keys(module.exports)) {",
+                                "        if (typeof module.exports[k] === 'function' && /stream|source|extract|scrape/i.test(k)) {",
+                                "            handler = module.exports[k]; break;",
+                                "        }",
+                                "    }",
+                                "}",
+                                "if (!handler) {",
+                                "    NuvioNative.logStep('SCRAPER', 'Discovery', 'No scraper entry point found', 'WARNING', 'No handler');",
+                                "    return [];",
+                                "}",
+                                "function hasStreams(r) {",
+                                "    if (!r) return false;",
+                                "    if (Array.isArray(r)) return r.length > 0;",
+                                "    if (typeof r === 'object') {",
+                                "        const list = r.streams || r.sources || r.results || r.data || r.links || r.list || r.items;",
+                                "        if (Array.isArray(list)) return list.length > 0;",
+                                "        return Object.keys(r).length > 0;",
+                                "    }",
+                                "    return false;",
+                                "}",
+                                "let result = null;",
+                                "const targetId = tmdbId || primaryId || imdbId;",
+                                "const targetImdb = imdbId || (primaryId.startsWith('tt') ? primaryId : '');",
+                                "const targetTmdb = tmdbId || (!primaryId.startsWith('tt') ? primaryId : '');",
+                                "// Strategy 1: Object argument (Standard Nuvio API)",
+                                "try {",
+                                "    const r = await handler(params);",
+                                "    if (hasStreams(r)) result = r;",
+                                "} catch(e) {}",
+                                "// Strategy 2: 6-Arg Positional",
+                                "if (!hasStreams(result)) {",
+                                "    try {",
+                                "        const r = await handler(targetId, isMovie ? 'movie' : 'tv', season, episode, title, year);",
+                                "        if (hasStreams(r)) result = r;",
+                                "    } catch(e) {}",
+                                "}",
+                                "// Strategy 3: Target IMDb ID",
+                                "if (!hasStreams(result) && targetImdb && targetImdb !== targetId) {",
+                                "    try {",
+                                "        const r = await handler(targetImdb, isMovie ? 'movie' : 'tv', season, episode, title, year);",
+                                "        if (hasStreams(r)) result = r;",
+                                "    } catch(e) {}",
+                                "}",
+                                "// Strategy 4: Target TMDB ID",
+                                "if (!hasStreams(result) && targetTmdb && targetTmdb !== targetId) {",
+                                "    try {",
+                                "        const r = await handler(targetTmdb, isMovie ? 'movie' : 'tv', season, episode, title, year);",
+                                "        if (hasStreams(r)) result = r;",
+                                "    } catch(e) {}",
+                                "}",
+                                "// Strategy 5: 2-Arg Positional",
+                                "if (!hasStreams(result)) {",
+                                "    try {",
+                                "        const r = await handler(targetId, isMovie ? 'movie' : (rawType || 'tv'));",
+                                "        if (hasStreams(r)) result = r;",
+                                "    } catch(e) {}",
+                                "}",
+                                "// Strategy 6: Title & Year search",
+                                "if (!hasStreams(result) && title) {",
+                                "    try {",
+                                "        const r = await handler(title, isMovie ? 'movie' : 'tv', year);",
+                                "        if (hasStreams(r)) result = r;",
+                                "    } catch(e) {}",
+                                "}",
+                                "return result || [];"
+                            ].join("\n");
+
                             const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-                            const runnerFn = new AsyncFunction('module', 'exports', 'global', 'window', 'require', 'params', `
-                                ${'$'}{cleanedCode}
+                            const fullCode = cleanedCode + "\n\n" + harness;
+                            const runnerFn = new AsyncFunction('module', 'exports', 'global', 'window', 'require', 'params', 'tmdbId', 'imdbId', 'primaryId', 'mediaType', 'rawType', 'isMovie', 'season', 'episode', 'title', 'year', fullCode);
 
-                                const primaryId = params.primaryId || "";
-                                const altId = params.altId || "";
-                                const tmdbId = params.tmdbId || "";
-                                const imdbId = params.imdbId || "";
-                                const rawType = params.type || "movie";
-                                const mediaType = (rawType === "movie") ? "movie" : (params.mediaType || "tv");
-                                const isMovie = (mediaType === "movie" || rawType === "movie");
-                                const season = (params.season !== undefined && params.season !== null) ? Number(params.season) : (isMovie ? null : 1);
-                                const episode = (params.episode !== undefined && params.episode !== null) ? Number(params.episode) : (isMovie ? null : 1);
-                                const title = params.title || "";
-                                const year = params.year || "";
+                            let result = await runnerFn(module, exports, window, window, requireShim, params, tmdbId, imdbId, primaryId, mediaType, rawType, isMovie, season, episode, title, year);
 
-                                let handler = null;
-                                if (typeof getStreams === "function") handler = getStreams;
-                                else if (typeof scrape === "function") handler = scrape;
-                                else if (module && module.exports && typeof module.exports.getStreams === "function") handler = module.exports.getStreams;
-                                else if (module && module.exports && typeof module.exports.scrape === "function") handler = module.exports.scrape;
-                                else if (module && typeof module.exports === "function") handler = module.exports;
-                                else if (exports && typeof exports.getStreams === "function") handler = exports.getStreams;
-                                else if (exports && typeof exports.scrape === "function") handler = exports.scrape;
-                                else if (exports && typeof exports.default === "function") handler = exports.default;
-                                else if (typeof window !== "undefined" && typeof window.getStreams === "function") handler = window.getStreams;
-                                else if (typeof window !== "undefined" && typeof window.scrape === "function") handler = window.scrape;
-                                else if (typeof getStream === "function") handler = getStream;
-                                else if (typeof getSources === "function") handler = getSources;
-                                else if (typeof extract === "function") handler = extract;
-                                else if (typeof extractStreams === "function") handler = extractStreams;
-                                else if (typeof streams === "function") handler = streams;
-
-                                if (!handler && module && module.exports && typeof module.exports === "object") {
-                                    for (const k of Object.keys(module.exports)) {
-                                        if (typeof module.exports[k] === "function" && /stream|source|extract|scrape/i.test(k)) {
-                                            handler = module.exports[k];
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if (!handler) {
-                                    NuvioNative.logStep("SCRAPER", "Handler Discovery", "No scraper entry point found (getStreams, scrape, module.exports)", "WARNING", "No entrypoint");
-                                    return [];
-                                }
-
-                                function hasStreams(r) {
-                                    if (!r) return false;
-                                    if (Array.isArray(r)) return r.length > 0;
-                                    if (typeof r === 'object') {
-                                        const list = r.streams || r.sources || r.results || r.data || r.links || r.list || r.items;
-                                        if (Array.isArray(list)) return list.length > 0;
-                                        return Object.keys(r).length > 0;
-                                    }
-                                    return false;
-                                }
-
-                                let result = null;
-                                const targetId = tmdbId || primaryId || imdbId;
-
-                                if (isMovie) {
-                                    // 1. 6-arg with Title & Year
-                                    try {
-                                        const r = await handler(targetId, "movie", 1, 1, title, year);
-                                        if (hasStreams(r)) result = r;
-                                    } catch(e) {
-                                        NuvioNative.logStep("STRATEGY", "6-Arg Call", "Failed: " + e.message, "INFO", "");
-                                    }
-
-                                    // 2. 2-arg standard
-                                    if (!hasStreams(result)) {
-                                        try {
-                                            const r = await handler(targetId, "movie");
-                                            if (hasStreams(r)) result = r;
-                                        } catch(_) {}
-                                    }
-
-                                    // 3. Object params
-                                    if (!hasStreams(result)) {
-                                        try {
-                                            const r = await handler(params);
-                                            if (hasStreams(r)) result = r;
-                                        } catch(_) {}
-                                    }
-
-                                    // 4. Alternate ID
-                                    if (!hasStreams(result) && altId && altId !== targetId) {
-                                        try {
-                                            const r = await handler(altId, "movie", 1, 1, title, year);
-                                            if (hasStreams(r)) result = r;
-                                        } catch(_) {}
-                                    }
-
-                                    // 5. Title & Year
-                                    if (!hasStreams(result) && title) {
-                                        try {
-                                            const r = await handler(title, "movie", year);
-                                            if (hasStreams(r)) result = r;
-                                        } catch(_) {}
-                                    }
-                                } else {
-                                    const s = season || 1;
-                                    const ep = episode || 1;
-
-                                    // 1. 6-arg with Title & Year
-                                    try {
-                                        const r = await handler(targetId, "tv", s, ep, title, year);
-                                        if (hasStreams(r)) result = r;
-                                    } catch(e) {
-                                        NuvioNative.logStep("STRATEGY", "Series 6-Arg Call", "Failed: " + e.message, "INFO", "");
-                                    }
-
-                                    // 2. 4-arg
-                                    if (!hasStreams(result)) {
-                                        try {
-                                            const r = await handler(targetId, "tv", s, ep);
-                                            if (hasStreams(r)) result = r;
-                                        } catch(_) {}
-                                    }
-
-                                    // 3. Object params
-                                    if (!hasStreams(result)) {
-                                        try {
-                                            const r = await handler(params);
-                                            if (hasStreams(r)) result = r;
-                                        } catch(_) {}
-                                    }
-
-                                    // 4. By rawType e.g. "series"
-                                    if (!hasStreams(result) && rawType !== "tv") {
-                                        try {
-                                            const r = await handler(targetId, rawType, s, ep, title, year);
-                                            if (hasStreams(r)) result = r;
-                                        } catch(_) {}
-                                    }
-                                }
-
-                                return result || [];
-                            `);
-
-                            let result = await runnerFn(module, exports, global, window, requireShim, params);
                             if (!Array.isArray(result) && result && typeof result === 'object') {
                                 result = result.streams || result.sources || result.results || result.data || result.links || result.list || result.items || [result];
                             }
@@ -704,7 +651,7 @@ class PluginRunner(private val context: Context) {
                                         if (m && m[1]) hash = m[1].toLowerCase();
                                     }
                                     return {
-                                        name: "[Nuvio] Stream Source",
+                                        name: "[Nuvio] Direct Stream",
                                         title: "1080p • Direct Playback",
                                         url: hash ? null : u,
                                         infoHash: hash,
@@ -971,8 +918,8 @@ class PluginRunner(private val context: Context) {
             webView?.evaluateJavascript(jsCall, null)
         }
 
-        // When timeoutMs <= 0, run until JS scraper completely finishes execution (with 5-min safeguard)
-        val effectiveTimeout = if (timeoutMs > 0) timeoutMs else 300_000L
+        // Default 15-second responsive timeout if none specified, capped at 30 seconds max
+        val effectiveTimeout = if (timeoutMs > 0) timeoutMs.coerceAtMost(30_000L) else 15_000L
         val result = withTimeoutOrNull(effectiveTimeout) {
             deferred.await()
         }
