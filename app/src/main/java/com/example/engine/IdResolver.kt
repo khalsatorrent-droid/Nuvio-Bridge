@@ -47,6 +47,7 @@ object IdResolver {
         val numericId = if (kitsuId.startsWith("kitsu:")) kitsuId.removePrefix("kitsu:") else kitsuId
         kitsuCache[numericId]?.let { return@withContext it }
 
+        AppLogger.info("RESOLVER", "Kitsu Lookup", "Starting 3-step fallback resolution for kitsu:$numericId")
         val encoded = URLEncoder.encode(numericId, "UTF-8")
 
         // 1. ARM API
@@ -65,13 +66,13 @@ object IdResolver {
                     obj.optString("imdb", obj.optString("imdb_id", ""))
                 }
                 if (imdb.startsWith("tt")) {
-                    Log.d(TAG, "Kitsu $numericId -> IMDb $imdb (ARM API)")
+                    AppLogger.success("RESOLVER", "ARM API Resolution", "kitsu:$numericId -> $imdb")
                     kitsuCache[numericId] = imdb
                     return@withContext imdb
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "ARM lookup for kitsu:$numericId failed: ${e.message}")
+            AppLogger.warn("RESOLVER", "ARM API Failed", "kitsu:$numericId lookup failed", e.message)
         }
 
         // 2. ani.zip
@@ -85,13 +86,13 @@ object IdResolver {
                 val mappings = obj.optJSONObject("mappings")
                 val imdb = mappings?.optString("imdb_id", "") ?: obj.optString("imdb_id", "")
                 if (imdb.startsWith("tt")) {
-                    Log.d(TAG, "Kitsu $numericId -> IMDb $imdb (ani.zip)")
+                    AppLogger.success("RESOLVER", "ani.zip Resolution", "kitsu:$numericId -> $imdb")
                     kitsuCache[numericId] = imdb
                     return@withContext imdb
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "ani.zip lookup for kitsu:$numericId failed: ${e.message}")
+            AppLogger.warn("RESOLVER", "ani.zip Failed", "kitsu:$numericId lookup failed", e.message)
         }
 
         // 3. Kitsu API mappings endpoint
@@ -112,17 +113,17 @@ object IdResolver {
                     val site = attrs?.optString("externalSite", "")
                     val extId = attrs?.optString("externalId", "")
                     if (site == "imdb" && extId != null && extId.startsWith("tt")) {
-                        Log.d(TAG, "Kitsu $numericId -> IMDb $extId (Kitsu API)")
+                        AppLogger.success("RESOLVER", "Kitsu API Resolution", "kitsu:$numericId -> $extId")
                         kitsuCache[numericId] = extId
                         return@withContext extId
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Kitsu API lookup for kitsu:$numericId failed: ${e.message}")
+            AppLogger.warn("RESOLVER", "Kitsu Mappings Failed", "kitsu:$numericId lookup failed", e.message)
         }
 
-        Log.w(TAG, "Could not resolve kitsu:$numericId to IMDb id")
+        AppLogger.warn("RESOLVER", "Kitsu Unresolved", "Could not resolve kitsu:$numericId to IMDb ID")
         null
     }
 
@@ -140,12 +141,68 @@ object IdResolver {
         val cacheKey = "$type:$cleanId"
         cache[cacheKey]?.let { return@withContext it }
 
+        val startTime = System.currentTimeMillis()
+        AppLogger.info("RESOLVER", "Starting Metadata Resolution", "Resolving input '$cleanId' for type '$type'")
+
         var imdb = existingImdbId ?: if (cleanId.startsWith("tt")) cleanId else null
         var tmdb = existingTmdbId ?: if (!cleanId.startsWith("tt") && cleanId.all { it.isDigit() }) cleanId else null
         var resolvedTitle: String? = null
         var resolvedYear: String? = null
 
         val effectiveKey = apiKey ?: DEFAULT_TMDB_KEY
+
+        // 0. If cleanId is neither an IMDb ID (tt...) nor a TMDB numeric ID, treat it as a Title Search Query
+        val isExplicitId = cleanId.startsWith("tt") || (cleanId.isNotEmpty() && cleanId.all { it.isDigit() }) || cleanId.startsWith("kitsu:")
+        if (!isExplicitId && cleanId.length >= 2) {
+            try {
+                AppLogger.info("RESOLVER", "Title Search", "Searching TMDB for '$cleanId' (type=$type)")
+                val searchType = if (type == "movie") "movie" else "tv"
+                val searchUrl = "https://api.themoviedb.org/3/search/$searchType?query=${URLEncoder.encode(cleanId, "UTF-8")}&api_key=$effectiveKey"
+                val req = Request.Builder().url(searchUrl).build()
+                val resp = client.newCall(req).execute()
+                val body = resp.body?.string()
+                if (resp.isSuccessful && !body.isNullOrEmpty()) {
+                    val obj = JSONObject(body)
+                    val results = obj.optJSONArray("results")
+                    if (results != null && results.length() > 0) {
+                        val first = results.getJSONObject(0)
+                        tmdb = first.optString("id", "")
+                        resolvedTitle = first.optString("title", first.optString("name", cleanId))
+                        resolvedYear = first.optString("release_date", first.optString("first_air_date", null))?.take(4)
+                        AppLogger.success("RESOLVER", "TMDB Search Matched", "Found: '$resolvedTitle' ($resolvedYear) -> TMDB ID: $tmdb")
+                    }
+                }
+            } catch (e: Exception) {
+                AppLogger.warn("RESOLVER", "TMDB Search Failed", "Search for '$cleanId' encountered error", e.message)
+            }
+
+            // Cinemeta catalog search fallback for titles
+            if (tmdb.isNullOrEmpty() || resolvedTitle == null) {
+                try {
+                    val cinemetaType = if (type == "movie") "movie" else "series"
+                    val cinemetaUrl = "https://v3-cinemeta.strem.io/catalog/$cinemetaType/top/search=${URLEncoder.encode(cleanId, "UTF-8")}.json"
+                    val req = Request.Builder().url(cinemetaUrl).header("User-Agent", "Mozilla/5.0").build()
+                    val resp = client.newCall(req).execute()
+                    val body = resp.body?.string()
+                    if (resp.isSuccessful && !body.isNullOrEmpty()) {
+                        val obj = JSONObject(body)
+                        val metas = obj.optJSONArray("metas")
+                        if (metas != null && metas.length() > 0) {
+                            val first = metas.getJSONObject(0)
+                            val foundImdb = first.optString("id", "")
+                            if (foundImdb.startsWith("tt")) {
+                                imdb = foundImdb
+                                resolvedTitle = first.optString("name", cleanId)
+                                resolvedYear = first.optString("year", null)
+                                AppLogger.success("RESOLVER", "Cinemeta Search Matched", "Found: '$resolvedTitle' ($resolvedYear) -> IMDb: $imdb")
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    AppLogger.warn("RESOLVER", "Cinemeta Search Failed", "Cinemeta search failed", e.message)
+                }
+            }
+        }
 
         // 1. If we have IMDB ID but need TMDB ID, query TMDB /find endpoint
         if (!imdb.isNullOrEmpty() && tmdb.isNullOrEmpty()) {
@@ -167,16 +224,17 @@ object IdResolver {
                     if (results != null && results.length() > 0) {
                         val first = results.getJSONObject(0)
                         tmdb = first.optString("id", "")
-                        resolvedTitle = first.optString("title", first.optString("name", null))
-                        resolvedYear = first.optString("release_date", first.optString("first_air_date", null))?.take(4)
+                        if (resolvedTitle == null) resolvedTitle = first.optString("title", first.optString("name", null))
+                        if (resolvedYear == null) resolvedYear = first.optString("release_date", first.optString("first_air_date", null))?.take(4)
+                        AppLogger.success("RESOLVER", "TMDB /find Resolution", "IMDb $imdb -> TMDB: $tmdb, Title: '$resolvedTitle' ($resolvedYear)")
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "TMDB /find failed for $imdb: ${e.message}")
+                AppLogger.warn("RESOLVER", "TMDB /find Failed", "TMDB /find failed for $imdb", e.message)
             }
         }
 
-        // 2. Cinemeta fallback lookup for IMDB ID
+        // 2. Cinemeta fallback lookup for IMDB ID (provides title, year, moviedb_id)
         if (!imdb.isNullOrEmpty() && (tmdb.isNullOrEmpty() || resolvedTitle == null)) {
             try {
                 val cinemetaType = if (type == "movie") "movie" else "series"
@@ -197,10 +255,11 @@ object IdResolver {
                         if (tmdbFound.isNotEmpty() && tmdb.isNullOrEmpty()) {
                             tmdb = tmdbFound
                         }
+                        AppLogger.success("RESOLVER", "Cinemeta Metadata Lookup", "IMDb $imdb -> Title: '$resolvedTitle', Year: '$resolvedYear', TMDB: $tmdb")
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Cinemeta lookup failed for $imdb: ${e.message}")
+                AppLogger.warn("RESOLVER", "Cinemeta Lookup Failed", "Cinemeta lookup failed for $imdb", e.message)
             }
         }
 
@@ -208,8 +267,6 @@ object IdResolver {
         if (!tmdb.isNullOrEmpty() && (imdb.isNullOrEmpty() || resolvedTitle == null || resolvedYear == null)) {
             try {
                 val tmdbEndpoint = if (type == "movie") "movie" else "tv"
-                
-                // Get title, year, and external IDs in one shot or sequentially
                 val detailsUrl = "https://api.themoviedb.org/3/$tmdbEndpoint/$tmdb?api_key=$effectiveKey&append_to_response=external_ids"
                 val request = Request.Builder().url(detailsUrl).build()
                 val response = client.newCall(request).execute()
@@ -230,12 +287,14 @@ object IdResolver {
                     if (foundImdb.startsWith("tt") && imdb.isNullOrEmpty()) {
                         imdb = foundImdb
                     }
+                    AppLogger.success("RESOLVER", "TMDB Details & External IDs", "TMDB $tmdb -> IMDb: $imdb, Title: '$resolvedTitle', Year: '$resolvedYear'")
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "TMDB details & external_ids lookup failed for $tmdb: ${e.message}")
+                AppLogger.warn("RESOLVER", "TMDB Details Lookup Failed", "TMDB details failed for $tmdb", e.message)
             }
         }
 
+        val duration = System.currentTimeMillis() - startTime
         val result = ResolvedMediaIds(
             imdbId = imdb,
             tmdbId = tmdb,
@@ -243,6 +302,23 @@ object IdResolver {
             year = resolvedYear,
             type = type
         )
+
+        if (imdb != null || tmdb != null || resolvedTitle != null) {
+            AppLogger.success(
+                "RESOLVER",
+                "Resolution Complete",
+                "Resolved: [IMDb: ${imdb ?: "N/A"}, TMDB: ${tmdb ?: "N/A"}, Title: '${resolvedTitle ?: "N/A"}', Year: ${resolvedYear ?: "N/A"}]",
+                durationMs = duration
+            )
+        } else {
+            AppLogger.error(
+                "RESOLVER",
+                "Resolution Failed",
+                "Could not resolve IDs or metadata for input '$cleanId'",
+                "ID not recognized by TMDB or Cinemeta"
+            )
+        }
+
         cache[cacheKey] = result
         result
     }

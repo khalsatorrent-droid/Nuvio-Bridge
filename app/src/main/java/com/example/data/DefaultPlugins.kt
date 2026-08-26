@@ -28,7 +28,7 @@ object DefaultPlugins {
                 id = "nuvio-yts",
                 name = "YTS Movie Torrents (4K & 1080p)",
                 description = "High-speed multi-quality P2P torrent stream resolver for Movies with verified seed health.",
-                version = "2.3.0",
+                version = "2.5.0",
                 author = "Nuvio Core",
                 repoUrl = "https://yts.mx",
                 isEnabled = true,
@@ -73,7 +73,6 @@ object DefaultPlugins {
 
                                     if (data && data.data && data.data.movies && data.data.movies.length > 0) {
                                         for (const movie of data.data.movies) {
-                                            // Match by IMDb if targetImdb provided
                                             if (targetImdb && movie.imdb_code && movie.imdb_code !== targetImdb) {
                                                 continue;
                                             }
@@ -114,7 +113,7 @@ object DefaultPlugins {
                 id = "nuvio-eztv",
                 name = "EZTV Series Torrents",
                 description = "Automated TV show and episode torrent stream resolver with live seed health tracking.",
-                version = "2.3.0",
+                version = "2.5.0",
                 author = "Nuvio Core",
                 repoUrl = "https://eztv.re",
                 isEnabled = true,
@@ -190,7 +189,7 @@ object DefaultPlugins {
                 id = "nuvio-dahmermovies",
                 name = "DahmerMovies Direct HD",
                 description = "High-speed multi-quality 1080p/720p direct stream provider with multi-server playback.",
-                version = "2.4.0",
+                version = "2.5.0",
                 author = "Nuvio Community",
                 repoUrl = "https://dahmermovies.com",
                 isEnabled = true,
@@ -230,30 +229,26 @@ object DefaultPlugins {
 
                         const isMovie = (type === "movie");
                         const endpoints = isMovie ? [
-                            "https://vidsrc.cc/v2/embed/movie/" + (tmdbId || imdbId),
-                            "https://vidsrc.me/embed/movie?imdb=" + (imdbId || tmdbId),
-                            "https://vidsrc.to/embed/movie/" + (tmdbId || imdbId),
-                            "https://autoembed.to/movie/tmdb/" + (tmdbId || imdbId)
+                            { name: "VidSrc Pro", url: "https://vidsrc.cc/v2/embed/movie/" + (tmdbId || imdbId) },
+                            { name: "VidSrc Me", url: "https://vidsrc.me/embed/movie?imdb=" + (imdbId || tmdbId) },
+                            { name: "VidSrc To", url: "https://vidsrc.to/embed/movie/" + (tmdbId || imdbId) },
+                            { name: "AutoEmbed", url: "https://autoembed.to/movie/tmdb/" + (tmdbId || imdbId) }
                         ] : [
-                            "https://vidsrc.cc/v2/embed/tv/" + (tmdbId || imdbId) + "/" + season + "/" + episode,
-                            "https://vidsrc.me/embed/tv?imdb=" + (imdbId || tmdbId) + "&season=" + season + "&episode=" + episode,
-                            "https://vidsrc.to/embed/tv/" + (tmdbId || imdbId) + "/" + season + "/" + episode,
-                            "https://autoembed.to/tv/tmdb/" + (tmdbId || imdbId) + "-" + season + "-" + episode
+                            { name: "VidSrc Pro", url: "https://vidsrc.cc/v2/embed/tv/" + (tmdbId || imdbId) + "/" + season + "/" + episode },
+                            { name: "VidSrc Me", url: "https://vidsrc.me/embed/tv?imdb=" + (imdbId || tmdbId) + "&season=" + season + "&episode=" + episode },
+                            { name: "VidSrc To", url: "https://vidsrc.to/embed/tv/" + (tmdbId || imdbId) + "/" + season + "/" + episode },
+                            { name: "AutoEmbed", url: "https://autoembed.to/tv/tmdb/" + (tmdbId || imdbId) + "-" + season + "-" + episode }
                         ];
 
-                        for (let i = 0; i < endpoints.length; i++) {
-                            const ep = endpoints[i];
-                            try {
-                                const serverName = i === 0 ? "VidSrc Pro" : (i === 1 ? "VidSrc Me" : (i === 2 ? "VidSrc To" : "AutoEmbed"));
-                                streams.push({
-                                    name: "[Dahmer] " + serverName + " 1080p",
-                                    title: (title || (isMovie ? "Movie" : ("S" + season + "E" + episode))) + "\n1080p • " + serverName + " • Direct Stream",
-                                    url: ep,
-                                    quality: "1080p",
-                                    provider: "DahmerMovies",
-                                    isDirect: true
-                                });
-                            } catch (_) {}
+                        for (const ep of endpoints) {
+                            streams.push({
+                                name: "[Dahmer] " + ep.name + " 1080p",
+                                title: (title || (isMovie ? "Movie" : ("S" + season + "E" + episode))) + "\n1080p • " + ep.name + " • Direct Stream",
+                                url: ep.url,
+                                quality: "1080p",
+                                provider: "DahmerMovies",
+                                isDirect: true
+                            });
                         }
 
                         return streams;
@@ -264,7 +259,7 @@ object DefaultPlugins {
                 id = "nuvio-cineby",
                 name = "Cineby Fast Stream",
                 description = "Ultra fast direct stream provider with multi-CDN sources for movies and TV series.",
-                version = "2.4.0",
+                version = "2.5.0",
                 author = "Nuvio Community",
                 repoUrl = "https://cineby.app",
                 isEnabled = true,
@@ -325,7 +320,7 @@ object DefaultPlugins {
                 id = "nuvio-uhdmovies",
                 name = "UHDMovies 4K & 1080p",
                 description = "Ultra High Definition 4K HDR & 1080p multi-server direct stream resolver.",
-                version = "2.4.0",
+                version = "2.5.0",
                 author = "Nuvio Community",
                 repoUrl = "https://uhdmovies.vip",
                 isEnabled = true,
@@ -386,7 +381,7 @@ object DefaultPlugins {
                 id = "nuvio-vixsrc",
                 name = "VixSrc Fast Cloud",
                 description = "Direct HLS / MP4 stream scraper with lightning fast load times.",
-                version = "2.4.0",
+                version = "2.5.0",
                 author = "Nuvio Community",
                 repoUrl = "https://vixcloud.co",
                 isEnabled = true,
@@ -443,12 +438,12 @@ object DefaultPlugins {
                 id = "nuvio-gogoanime",
                 name = "GogoAnime HLS Stream Resolver",
                 description = "Resolves direct multi-quality HLS .m3u8 streams for Anime episodes (Sub & Dub).",
-                version = "2.3.0",
+                version = "2.5.0",
                 author = "Anime Core",
                 repoUrl = "https://gogoanime.cl",
                 isEnabled = true,
                 supportedTypes = "anime,series,movie",
-                orderPriority = 3,
+                orderPriority = 7,
                 jsCode = """
                     async function getStreams(arg1, arg2, arg3, arg4) {
                         const streams = [];

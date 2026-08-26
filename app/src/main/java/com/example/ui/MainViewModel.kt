@@ -102,6 +102,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         initialValue = 0
     )
 
+    val executionLogs: StateFlow<List<com.example.engine.ExecutionStepLog>> = com.example.engine.AppLogger.logsFlow
+
     init {
         viewModelScope.launch {
             ServerService.isServerRunningFlow.collect { running ->
@@ -345,6 +347,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearLogs() {
         viewModelScope.launch {
             repository.clearLogs()
+            com.example.engine.AppLogger.clear()
         }
     }
 

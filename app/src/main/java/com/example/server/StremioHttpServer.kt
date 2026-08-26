@@ -7,6 +7,7 @@ import com.example.data.model.ServerLogEntity
 import com.example.data.model.StremioManifest
 import com.example.data.model.StremioStreamResponse
 import com.example.data.repository.PluginRepository
+import com.example.engine.AppLogger
 import com.example.engine.IdResolver
 import com.example.engine.PluginRunner
 import com.example.engine.StreamFormatter
@@ -307,6 +308,8 @@ class StremioHttpServer(
 
         Log.i(TAG, "Stream request parsed: type=$type id=$mainId season=$season episode=$episode imdbId=$imdbId tmdbId=$tmdbId kitsuId=$kitsuId")
 
+        AppLogger.info("SERVER", "Incoming Stream Request", "Path: $path | Type: $type, ID: $mainId, S: $season, Ep: $episode")
+
         // Auto resolve dual IDs so providers expecting tmdbId (Nuvio standard) or imdbId receive both
         val resolvedIds = IdResolver.resolve(
             rawId = mainId,
@@ -323,7 +326,10 @@ class StremioHttpServer(
             types.isEmpty() || types.contains(type.lowercase()) || types.contains("all")
         }
 
+        AppLogger.info("SERVER", "Executing Scrapers", "Launching ${enabledPlugins.size} enabled providers concurrently")
+
         if (enabledPlugins.isEmpty()) {
+            AppLogger.warn("SERVER", "No Active Scrapers", "No enabled providers matched media type '$type'")
             return StremioStreamResponse(emptyList())
         }
 
@@ -346,7 +352,7 @@ class StremioHttpServer(
                         timeoutMs = timeoutMs
                     )
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error executing plugin ${plugin.id}", e)
+                    AppLogger.error(plugin.name, "Scraper Exception", e.message ?: "Unknown scraper error", e.message)
                     emptyList<RawPluginStream>()
                 }
             }
@@ -359,6 +365,12 @@ class StremioHttpServer(
             groupByQuality = groupByQuality,
             filterOutLowQuality = filterOutLowQuality
         )
+
+        if (formattedStreams.isNotEmpty()) {
+            AppLogger.success("SERVER", "Streams Formatted", "Returning ${formattedStreams.size} final streams to client")
+        } else {
+            AppLogger.warn("SERVER", "No Streams Found", "All ${enabledPlugins.size} scrapers finished but found 0 active streams", "No active links or sources available for this title")
+        }
 
         val response = StremioStreamResponse(streams = formattedStreams)
         if (formattedStreams.isNotEmpty()) {

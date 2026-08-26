@@ -134,6 +134,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
     val libraryRepos by viewModel.libraryRepos.collectAsStateWithLifecycle()
     val isLibraryLoading by viewModel.isLibraryLoading.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
+    val executionLogs by viewModel.executionLogs.collectAsStateWithLifecycle()
     val totalRequests by viewModel.totalRequests.collectAsStateWithLifecycle()
     val totalStreams by viewModel.totalStreams.collectAsStateWithLifecycle()
 
@@ -327,7 +328,8 @@ fun MainAppScreen(viewModel: MainViewModel) {
                 }
                 NavTab.LOGS -> {
                     LogsScreen(
-                        logs = logs,
+                        serverLogs = logs,
+                        executionLogs = executionLogs,
                         onClearLogs = { viewModel.clearLogs() }
                     )
                 }
